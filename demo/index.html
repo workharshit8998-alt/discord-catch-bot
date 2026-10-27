@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Phishing Awareness Training Demo</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#17191f;color:#f4f5f7;font:16px/1.5 system-ui,sans-serif}.wrap{width:min(100%,520px)}.warning{padding:12px;background:#4a3511;border:1px solid #8a6724;border-radius:10px;margin-bottom:14px;color:#ffe4a3}.card{padding:26px;background:#23262f;border:1px solid #383d4a;border-radius:16px}h1{font-size:23px}p,li{color:#c3c8d2}label{display:block;margin:14px 0 5px}input{width:100%;padding:12px;border-radius:8px;border:1px solid #444b5a;background:#17191f;color:white;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#7289da;color:white;font-weight:700;font-size:16px}.hidden{display:none}.pill{font-size:12px;background:#31384b;padding:4px 8px;border-radius:6px}
+</style></head>
+<body><main class="wrap">
+<div class="warning"><strong>TRAINING SIMULATION</strong> — Not Discord. Do not enter real credentials.</div>
+<section class="card" id="demo"><span class="pill">Security awareness exercise</span><h1>Example Verification Portal</h1>
+<p>This fictional page demonstrates how a convincing login prompt can trick people into sharing secrets.</p>
+<form id="form"><label for="email">Example email</label><input id="email" autocomplete="off" placeholder="student@example.test"><label for="password">Example password</label><input id="password" type="password" autocomplete="off" placeholder="Use DEMO only"><button>Continue training</button></form>
+<p><small>Do not use your real email, password, login code, or token.</small></p></section>
+<section class="card hidden" id="lesson" aria-live="polite"><h1>That's the lesson</h1>
+<p>This demo did not read, transmit, or save anything you typed. A real malicious page may send submitted data to an attacker.</p>
+<h2>Warning signs</h2><ul><li>Unexpected verification requests or urgent language.</li><li>A domain that is not an official Discord domain.</li><li>A page asking for passwords, login codes, or session tokens.</li><li>Unsolicited DMs and suspicious bot messages.</li></ul>
+<h2>Stay safe</h2><ul><li>Open Discord directly through its official app or website.</li><li>Never share passwords, one-time codes, backup codes, or tokens.</li><li>If you entered real details, change your password through the official service and enable MFA.</li></ul>
+<button id="again" type="button">Review demo again</button></section></main>
+<script>
+const form=document.getElementById('form'),demo=document.getElementById('demo'),lesson=document.getElementById('lesson');
+form.addEventListener('submit',e=>{e.preventDefault();form.reset();demo.classList.add('hidden');lesson.classList.remove('hidden');});
+document.getElementById('again').addEventListener('click',()=>{lesson.classList.add('hidden');demo.classList.remove('hidden');});
+</script></body></html>
