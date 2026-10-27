@@ -2,23 +2,39 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Phishing Awareness Training Demo</title>
+<meta name="theme-color" content="#313338">
+<title>Verification Lab • Security Training</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#17191f;color:#f4f5f7;font:16px/1.5 system-ui,sans-serif}.wrap{width:min(100%,520px)}.warning{padding:12px;background:#4a3511;border:1px solid #8a6724;border-radius:10px;margin-bottom:14px;color:#ffe4a3}.card{padding:26px;background:#23262f;border:1px solid #383d4a;border-radius:16px}h1{font-size:23px}p,li{color:#c3c8d2}label{display:block;margin:14px 0 5px}input{width:100%;padding:12px;border-radius:8px;border:1px solid #444b5a;background:#17191f;color:white;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#7289da;color:white;font-weight:700;font-size:16px}.hidden{display:none}.pill{font-size:12px;background:#31384b;padding:4px 8px;border-radius:6px}
+:root{color-scheme:dark;--bg:#313338;--panel:#2b2d31;--muted:#b5bac1;--white:#f2f3f5;--accent:#5865f2;--line:#3f4147}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--white);font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;padding:22px}
+.shell{width:min(100%,460px)}.brand{display:flex;align-items:center;gap:12px;margin:0 0 20px;font-weight:800;letter-spacing:.04em}.mark{width:42px;height:42px;border-radius:14px;background:var(--accent);display:grid;place-items:center;font-size:22px}.brand small{display:block;color:var(--muted);font-weight:500;letter-spacing:0;font-size:12px}
+.card{background:var(--panel);padding:28px;border-radius:10px;box-shadow:0 8px 28px #0002}.eyebrow{display:inline-flex;align-items:center;gap:7px;color:#c9cdfd;background:#383d78;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:700}h1{font-size:24px;line-height:1.25;margin:16px 0 8px}p{color:var(--muted);margin:0 0 18px}.steps{display:grid;gap:10px;margin:20px 0}.step{display:flex;gap:12px;align-items:flex-start;padding:12px;background:#232428;border:1px solid var(--line);border-radius:8px}.num{background:#404249;color:#fff;border-radius:50%;min-width:26px;height:26px;display:grid;place-items:center;font-size:13px;font-weight:700}.step strong{display:block;font-size:14px}.step span{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+button{width:100%;border:0;border-radius:5px;padding:12px 16px;background:var(--accent);color:white;font-weight:700;font-size:15px;cursor:pointer}button:hover{background:#4752c4}.sub{margin-top:12px;background:#404249}.foot{text-align:center;color:#949ba4;font-size:12px;margin-top:14px}.hidden{display:none!important}.result{border:1px solid #3ba55c;background:#203a2b;padding:14px;border-radius:8px;margin:18px 0}.result strong{color:#7ee0a0}
 </style></head>
-<body><main class="wrap">
-<div class="warning"><strong>TRAINING SIMULATION</strong> — Not Discord. Do not enter real credentials.</div>
-<section class="card" id="demo"><span class="pill">Security awareness exercise</span><h1>Example Verification Portal</h1>
-<p>This fictional page demonstrates how a convincing login prompt can trick people into sharing secrets.</p>
-<form id="form"><label for="email">Example email</label><input id="email" autocomplete="off" placeholder="student@example.test"><label for="password">Example password</label><input id="password" type="password" autocomplete="off" placeholder="Use DEMO only"><button>Continue training</button></form>
-<p><small>Do not use your real email, password, login code, or token.</small></p></section>
-<section class="card hidden" id="lesson" aria-live="polite"><h1>That's the lesson</h1>
-<p>This demo did not read, transmit, or save anything you typed. A real malicious page may send submitted data to an attacker.</p>
-<h2>Warning signs</h2><ul><li>Unexpected verification requests or urgent language.</li><li>A domain that is not an official Discord domain.</li><li>A page asking for passwords, login codes, or session tokens.</li><li>Unsolicited DMs and suspicious bot messages.</li></ul>
-<h2>Stay safe</h2><ul><li>Open Discord directly through its official app or website.</li><li>Never share passwords, one-time codes, backup codes, or tokens.</li><li>If you entered real details, change your password through the official service and enable MFA.</li></ul>
-<button id="again" type="button">Review demo again</button></section></main>
+<body><main class="shell">
+<header class="brand"><div class="mark" aria-hidden="true">✓</div><div>VERIFICATION LAB<small>Security awareness exercise</small></div></header>
+<section class="card" id="demo">
+<span class="eyebrow">● TRAINING MODE</span>
+<h1>Complete the verification check</h1>
+<p>This Discord-inspired mockup demonstrates how a verification prompt can look. It is not Discord sign-in.</p>
+<div class="steps">
+<div class="step"><div class="num">1</div><div><strong>Review the request</strong><span>Did you expect this verification link?</span></div></div>
+<div class="step"><div class="num">2</div><div><strong>Check the website address</strong><span>Look carefully at the domain before continuing.</span></div></div>
+<div class="step"><div class="num">3</div><div><strong>Keep account secrets private</strong><span>Legitimate verification should never ask you to paste a session token.</span></div></div>
+</div>
+<button id="continue" type="button">Continue demo</button>
+<div class="foot">Fictional interface • No login or account connection</div>
+</section>
+<section class="card hidden" id="lesson" aria-live="polite">
+<span class="eyebrow">✓ DEMO COMPLETE</span><h1>Nice work reviewing the signs</h1>
+<div class="result"><strong>Simulation only</strong><div>This exercise did not request, read, transmit, or save any credentials or tokens.</div></div>
+<h2 style="font-size:17px">Remember</h2>
+<p>Open Discord directly in its official app or by typing its address yourself. Never share passwords, one-time codes, backup codes, or session tokens with a bot or website.</p>
+<button id="again" type="button">Run demo again</button>
+</section>
+</main>
 <script>
-const form=document.getElementById('form'),demo=document.getElementById('demo'),lesson=document.getElementById('lesson');
-form.addEventListener('submit',e=>{e.preventDefault();form.reset();demo.classList.add('hidden');lesson.classList.remove('hidden');});
-document.getElementById('again').addEventListener('click',()=>{lesson.classList.add('hidden');demo.classList.remove('hidden');});
+const demo=document.getElementById('demo'),lesson=document.getElementById('lesson');
+document.getElementById('continue').addEventListener('click',()=>{demo.classList.add('hidden');lesson.classList.remove('hidden')});
+document.getElementById('again').addEventListener('click',()=>{lesson.classList.add('hidden');demo.classList.remove('hidden')});
 </script></body></html>
