@@ -542,8 +542,37 @@ async def approve(i:discord.Interaction,member:discord.Member):
     if not i.guild or not staff(i): return await i.response.send_message("Only configured staff or admins can approve claims.",ephemeral=True)
     c=database(); t=c.execute("SELECT * FROM tickets WHERE channel=? AND guild=? AND user=? AND status='open'",(i.channel_id,i.guild.id,member.id)).fetchone()
     if not t or not t["reward"]: c.close(); return await i.response.send_message("Run this inside the member's open ticket after they choose a reward.",ephemeral=True)
-    old=c.execute("SELECT status FROM claims WHERE guild=? AND user=? AND reward=?",(i.guild.id,member.id,t["reward"])).fetchone()
-    if old: c.close(); return await i.response.send_message("This member already has a claim for this reward.",ephemeral=True)
+    old=c.execute("SELECT status,code FROM claims WHERE guild=? AND user=? AND reward=?",(i.guild.id,member.id,t["reward"])).fetchone()
+    if old:
+        c.close()
+        if old["status"] == "redeemed":
+            return await i.response.send_message("This reward code has already been redeemed and cannot be issued again.",ephemeral=True)
+        existing_code = old["code"]
+        if not existing_code:
+            return await i.response.send_message("An existing claim record has no code. Ask an administrator to inspect the claim database.",ephemeral=True)
+        # Re-deliver the same claim; never create a second claim for the same reward.
+        try:
+            rows = sb_request("trigger_reward_valid_codes", "GET", params={
+                "select":"id,active", "guild_id":"eq."+str(i.guild.id),
+                "category":"eq."+str(t["category"]), "reward_name":"eq."+str(t["reward"]),
+                "code_value":"eq."+str(existing_code)
+            })
+            if not rows:
+                sb_request("trigger_reward_valid_codes", "POST", payload={
+                    "guild_id":str(i.guild.id), "category":t["category"],
+                    "reward_name":t["reward"], "code_value":existing_code, "active":True
+                })
+            elif not any(row.get("active") for row in rows):
+                return await i.response.send_message("The existing code is inactive, so it cannot be reissued. An administrator must review it.",ephemeral=True)
+        except Exception as ex:
+            return await i.response.send_message("Couldn't confirm the existing code on the website. No new claim was created. Details: "+str(ex)[:120],ephemeral=True)
+        await i.response.send_message(f"Existing claim found for {member.mention}; I’m resending the same code, not creating another claim.",ephemeral=True)
+        e=discord.Embed(title="🎉 Your existing reward claim",description=f"**Reward:** {t['reward']}\\n**Your code:** ||{existing_code}||\\n\\n[Claim here]({SITE_URL})\\n\\nThis is your original code; duplicate claims are blocked.",color=0x57f287)
+        try:
+            await member.send(embed=e)
+        except discord.Forbidden:
+            await i.channel.send(f"{member.mention} I couldn't DM you. Your existing code is ||{existing_code}||")
+        return
     code=None
     for _ in range(30):
         candidate=f"{secrets.randbelow(10_000_000):07d}"
