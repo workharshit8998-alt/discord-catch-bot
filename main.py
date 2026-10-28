@@ -1,4 +1,4 @@
-import os, re, sqlite3, secrets
+import os, re, sqlite3, secrets, json, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
@@ -9,10 +9,35 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 SITE_URL = os.getenv("DEMO_URL", "https://trigger-rewards.vercel.app").strip()
 DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 CATS = {"youtube": ("▶️", "YouTube"), "minecraft": ("🟩", "Minecraft"), "streaming": ("📺", "OTT & Streaming")}
+
+def sb_request(table, method="GET", params=None, payload=None):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Botkeep environment variables.")
+    query = urllib.parse.urlencode(params or {}, doseq=True)
+    url = f"{SUPABASE_URL}/rest/v1/{table}" + (f"?{query}" if query else "")
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method=method, headers={"apikey":SUPABASE_SERVICE_ROLE_KEY,"Authorization":f"Bearer {SUPABASE_SERVICE_ROLE_KEY}","Content-Type":"application/json","Prefer":"return=representation,resolution=merge-duplicates"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            raw=response.read().decode("utf-8")
+            return json.loads(raw) if raw else []
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("Supabase HTTP "+str(e.code)+": "+e.read().decode("utf-8","replace")[:250]) from e
+
+def get_categories(guild_id):
+    return sb_request("trigger_reward_categories",params={"select":"category_key,category_label,category_emoji,sort_order","guild_id":"eq."+str(guild_id),"active":"eq.true","order":"sort_order.asc,category_label.asc"})
+
+def get_rewards(guild_id, category=None):
+    p={"select":"category,category_label,category_emoji,reward_name,invite_requirement,sort_order","guild_id":"eq."+str(guild_id),"active":"eq.true","order":"sort_order.asc,reward_name.asc"}
+    if category: p["category"]="eq."+category
+    return sb_request("trigger_rewards_config",params=p)
+
 
 def database():
     c = sqlite3.connect(DB_FILE)
