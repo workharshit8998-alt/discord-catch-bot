@@ -87,42 +87,68 @@ class Panel(discord.ui.View):
         c.commit(); c.close()
         e=discord.Embed(title="🎟️ Trigger Rewards Support",description=f"Welcome {i.user.mention}! Choose a category below.\n\nNever share your Discord password, session token or 2FA codes.",color=0xf2b84b)
         e.set_footer(text="Trigger Rewards • Private support")
-        await ch.send(content=i.user.mention,embed=e,view=Categories())
+        try:
+            cats = get_categories(i.guild.id)
+            if cats:
+                await ch.send(content=i.user.mention, embed=e, view=Categories(cats))
+            else:
+                await ch.send(content=i.user.mention + " No reward categories are configured yet. Ask an administrator to use /category-add.")
+        except Exception as ex:
+            print("Could not load categories:", ex)
+            await ch.send(content=i.user.mention + " Rewards database is not ready. Please contact an administrator.")
         await i.response.send_message(f"Your private ticket is ready: {ch.mention}",ephemeral=True)
 
 class Categories(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.select(placeholder="Choose a reward category",custom_id="trg:category",options=[
-        discord.SelectOption(label="YouTube",value="youtube",emoji="▶️"),
-        discord.SelectOption(label="Minecraft",value="minecraft",emoji="🟩"),
-        discord.SelectOption(label="OTT & Streaming",value="streaming",emoji="📺")])
-    async def choose(self,i,s):
-        c=database(); t=c.execute("SELECT * FROM tickets WHERE channel=? AND status='open'",(i.channel_id,)).fetchone()
-        if not t or t["user"]!=i.user.id:
-            c.close(); return await i.response.send_message("Only the ticket owner can choose a category.",ephemeral=True)
-        cat=s.values[0]; c.execute("UPDATE tickets SET category=? WHERE channel=?",(cat,i.channel_id))
-        rows=c.execute("SELECT name,invites FROM rewards WHERE guild=? AND category=? AND active=1 ORDER BY name",(i.guild.id,cat)).fetchall()
-        c.commit(); c.close()
-        if not rows: return await i.response.send_message("No rewards configured here yet. Ask an administrator to use /reward-add.",ephemeral=True)
-        view=RewardChoices(cat,[dict(r) for r in rows])
-        await i.response.send_message(f"Selected **{CATS[cat][1]}**. Now choose your reward.",view=view,ephemeral=True)
+    def __init__(self, categories):
+        super().__init__(timeout=None)
+        options = [discord.SelectOption(label=x["category_label"][:100], value=x["category_key"], emoji=x.get("category_emoji") or "🎁") for x in categories[:25]]
+        select = discord.ui.Select(placeholder="Choose a reward category", custom_id="trg:category", options=options)
+        select.callback = self.choose
+        self.add_item(select)
+
+    async def choose(self, i):
+        c = database()
+        ticket = c.execute("SELECT * FROM tickets WHERE channel=? AND status='open'", (i.channel_id,)).fetchone()
+        if not ticket or ticket["user"] != i.user.id:
+            c.close()
+            return await i.response.send_message("Only the ticket owner can choose a category.", ephemeral=True)
+        key = self.children[0].values[0]
+        try:
+            category = next((x for x in get_categories(i.guild.id) if x["category_key"] == key), None)
+            rows = get_rewards(i.guild.id, key)
+        except Exception as ex:
+            c.close()
+            return await i.response.send_message("Could not load rewards: " + str(ex)[:180], ephemeral=True)
+        if not category:
+            c.close()
+            return await i.response.send_message("That category is no longer active.", ephemeral=True)
+        c.execute("UPDATE tickets SET category=? WHERE channel=?", (key, i.channel_id))
+        c.commit()
+        c.close()
+        if not rows:
+            return await i.response.send_message("No rewards configured here yet. Ask staff to use /reward-add.", ephemeral=True)
+        await i.response.send_message("Selected **" + category["category_label"] + "**. Now choose your reward.", view=RewardChoices(key, rows), ephemeral=True)
 
 class RewardChoices(discord.ui.View):
     def __init__(self,cat,rows):
         super().__init__(timeout=300); self.cat=cat
-        sel=discord.ui.Select(placeholder="Choose a reward",options=[discord.SelectOption(label=r["name"][:100],value=r["name"],description=f"Required invites: {r['invites']}") for r in rows[:25]])
+        sel=discord.ui.Select(placeholder="Choose a reward",options=[discord.SelectOption(label=r["reward_name"][:100],value=r["reward_name"],description="Required invites: "+str(r.get("invite_requirement",0))) for r in rows[:25]])
         sel.callback=self.pick; self.add_item(sel)
     async def pick(self,i):
         name=i.data["values"][0]; c=database()
         t=c.execute("SELECT * FROM tickets WHERE channel=? AND status='open'",(i.channel_id,)).fetchone()
-        r=c.execute("SELECT invites FROM rewards WHERE guild=? AND category=? AND name=? AND active=1",(i.guild.id,self.cat,name)).fetchone()
+        try:
+            r=next((x for x in get_rewards(i.guild.id,self.cat) if x["reward_name"]==name),None)
+        except Exception as ex:
+            c.close()
+            return await i.response.send_message("Could not verify reward: "+str(ex)[:180],ephemeral=True)
         if not t or t["user"]!=i.user.id or not r:
             c.close(); return await i.response.send_message("Ticket/reward is no longer valid.",ephemeral=True)
         prior=c.execute("SELECT status FROM claims WHERE guild=? AND user=? AND reward=?",(i.guild.id,i.user.id,name)).fetchone()
         if prior:
             c.close(); return await i.response.send_message("You already claimed this reward. Duplicate claims are blocked.",ephemeral=True)
         c.execute("UPDATE tickets SET reward=? WHERE channel=?",(name,i.channel_id)); c.commit(); c.close()
-        e=discord.Embed(title="📋 Invite Requirement",description=f"**Reward:** {name}\n**Required invites:** {r['invites']}\n\nRun your invite tracker bot's -i command, then wait for staff to verify the result in this ticket. Staff will use /approve-claim after checking the tracker output.",color=0x5865f2)
+        e=discord.Embed(title="📋 Invite Requirement",description=f"**Reward:** {name}\n**Required invites:** {r['invite_requirement']}\n\nRun your invite tracker bot's -i command, then wait for staff to verify the result in this ticket. Staff will use /approve-claim after checking the tracker output.",color=0x5865f2)
         e.set_footer(text="Verification is staff-checked for now; no invite count is guessed.")
         await i.response.send_message(embed=e,view=CloseView())
 
@@ -141,7 +167,7 @@ class CloseView(discord.ui.View):
 
 @bot.event
 async def on_ready():
-    bot.add_view(Panel()); bot.add_view(Categories()); bot.add_view(CloseView())
+    bot.add_view(Panel()); bot.add_view(CloseView())
     try:
         synced=await bot.tree.sync()
         print(f"Ready as {bot.user}; synced {len(synced)} commands")
@@ -153,8 +179,8 @@ async def on_ready():
 async def ticket_setup(i:discord.Interaction,channel:discord.TextChannel,category:discord.CategoryChannel=None):
     if not i.guild or not i.user.guild_permissions.administrator: return await i.response.send_message("Administrator only.",ephemeral=True)
     c=database(); c.execute("INSERT INTO settings(guild,ticket_category) VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET ticket_category=excluded.ticket_category",(i.guild.id,category.id if category else 0)); c.commit(); c.close()
-    e=discord.Embed(title="🎁 TRIGGER REWARDS",description="Claim rewards through a private ticket.\n\n1. Open a ticket.\n2. Choose YouTube, Minecraft, or OTT & Streaming.\n3. Select a reward and complete its invite requirement.\n4. Staff verify the tracker result and issue a unique code.\n\nEach user can claim each reward once. Codes are single-use and become invalid after redemption. Never share passwords or tokens.",color=0xf2b84b)
-    e.add_field(name="Reward categories",value="▶️ YouTube  •  🟩 Minecraft  •  📺 OTT & Streaming",inline=False); e.set_footer(text="Trigger Rewards • Official reward support")
+    e=discord.Embed(title="🎁 TRIGGER REWARDS",description="Claim rewards through a private ticket.\n\n1. Open a ticket.\n2. Choose a category configured by server staff.\n3. Select a reward and complete its invite requirement.\n4. Staff verify the tracker result and issue a unique code.\n\nEach user can claim each reward once. Codes are single-use and become invalid after redemption. Never share passwords or tokens.",color=0xf2b84b)
+    e.set_footer(text="Trigger Rewards • Official reward support")
     await channel.send(embed=e,view=Panel())
     await i.response.send_message(f"Panel posted in {channel.mention}.",ephemeral=True)
 
@@ -174,27 +200,63 @@ async def invite_req(i:discord.Interaction,count:app_commands.Range[int,0,1000])
     c=database(); c.execute("INSERT INTO settings(guild,invite_default) VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET invite_default=excluded.invite_default",(i.guild.id,count)); c.commit(); c.close()
     await i.response.send_message(f"Default invite requirement set to **{count}**.",ephemeral=True)
 
-@bot.tree.command(name="reward-add",description="Add a reward to the category menu")
+@bot.tree.command(name="category-add",description="Create or update a website reward category")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
-@app_commands.choices(category=[app_commands.Choice(name="YouTube",value="youtube"),app_commands.Choice(name="Minecraft",value="minecraft"),app_commands.Choice(name="OTT & Streaming",value="streaming")])
-async def reward_add(i:discord.Interaction,category:app_commands.Choice[str],name:app_commands.Range[str,2,80],invites:app_commands.Range[int,0,1000]=None):
-    if not i.guild or not i.user.guild_permissions.administrator: return await i.response.send_message("Administrator only.",ephemeral=True)
-    required=invites if invites is not None else cfg(i.guild.id)["invite_default"]
-    c=database()
-    try: c.execute("INSERT INTO rewards(guild,category,name,invites) VALUES(?,?,?,?)",(i.guild.id,category.value,name.strip(),required)); c.commit()
-    except sqlite3.IntegrityError:
-        c.close(); return await i.response.send_message("That reward already exists in this category.",ephemeral=True)
-    c.close(); await i.response.send_message(f"Added **{name}** under **{CATS[category.value][1]}**, requiring **{required}** invites.",ephemeral=True)
+async def category_add(i:discord.Interaction,key:app_commands.Range[str,2,32],label:app_commands.Range[str,2,80],emoji:str="🎁"):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.",ephemeral=True)
+    key=re.sub(r"[^a-z0-9_-]","",key.lower().strip())
+    if not key:
+        return await i.response.send_message("Use letters, numbers, hyphens or underscores for the key.",ephemeral=True)
+    try:
+        sb_request("trigger_reward_categories","POST",params={"on_conflict":"guild_id,category_key"},payload={"guild_id":str(i.guild.id),"category_key":key,"category_label":label.strip(),"category_emoji":emoji.strip()[:16] or "🎁","active":True})
+        await i.response.send_message("Saved category **"+label.strip()+"**. Use /reward-add to add its rewards.",ephemeral=True)
+    except Exception as ex:
+        await i.response.send_message("Could not save category: "+str(ex)[:220],ephemeral=True)
 
-@bot.tree.command(name="reward-remove",description="Disable a reward option")
+@bot.tree.command(name="category-remove",description="Hide a category and its rewards from the website")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
-@app_commands.choices(category=[app_commands.Choice(name="YouTube",value="youtube"),app_commands.Choice(name="Minecraft",value="minecraft"),app_commands.Choice(name="OTT & Streaming",value="streaming")])
-async def reward_remove(i:discord.Interaction,category:app_commands.Choice[str],name:str):
-    if not i.guild or not i.user.guild_permissions.administrator: return await i.response.send_message("Administrator only.",ephemeral=True)
-    c=database(); cur=c.execute("UPDATE rewards SET active=0 WHERE guild=? AND category=? AND name=?",(i.guild.id,category.value,name.strip())); c.commit(); c.close()
-    await i.response.send_message("Reward disabled." if cur.rowcount else "Reward not found.",ephemeral=True)
+async def category_remove(i:discord.Interaction,key:app_commands.Range[str,2,32]):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.",ephemeral=True)
+    key=re.sub(r"[^a-z0-9_-]","",key.lower().strip())
+    try:
+        sb_request("trigger_reward_categories","PATCH",params={"guild_id":f"eq.{i.guild.id}","category_key":f"eq.{key}"},payload={"active":False})
+        sb_request("trigger_rewards_config","PATCH",params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}"},payload={"active":False})
+        await i.response.send_message("Category **"+key+"** and its rewards are hidden.",ephemeral=True)
+    except Exception as ex:
+        await i.response.send_message("Could not remove category: "+str(ex)[:220],ephemeral=True)
+
+@bot.tree.command(name="reward-add",description="Add a website reward with its exact name and invite requirement")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def reward_add(i:discord.Interaction,category_key:app_commands.Range[str,2,32],name:app_commands.Range[str,2,80],invites:app_commands.Range[int,0,1000]):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.",ephemeral=True)
+    key=re.sub(r"[^a-z0-9_-]","",category_key.lower().strip())
+    try:
+        category=next((x for x in get_categories(i.guild.id) if x["category_key"]==key),None)
+        if not category:
+            return await i.response.send_message("Category not found. Run /category-add first.",ephemeral=True)
+        sb_request("trigger_rewards_config","POST",params={"on_conflict":"guild_id,category,reward_name"},payload={"guild_id":str(i.guild.id),"category":key,"category_label":category["category_label"],"category_emoji":category.get("category_emoji") or "🎁","reward_name":name.strip(),"invite_requirement":int(invites),"active":True})
+        await i.response.send_message("Added **"+name.strip()+"** under **"+category["category_label"]+"** with **"+str(invites)+"** required invites.",ephemeral=True)
+    except Exception as ex:
+        await i.response.send_message("Could not save reward: "+str(ex)[:220],ephemeral=True)
+
+@bot.tree.command(name="reward-remove",description="Hide a website reward")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def reward_remove(i:discord.Interaction,category_key:app_commands.Range[str,2,32],name:app_commands.Range[str,2,80]):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.",ephemeral=True)
+    key=re.sub(r"[^a-z0-9_-]","",category_key.lower().strip())
+    try:
+        rows=sb_request("trigger_rewards_config","PATCH",params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}","reward_name":f"eq.{name.strip()}"},payload={"active":False})
+        await i.response.send_message("Reward hidden." if rows else "Reward not found.",ephemeral=True)
+    except Exception as ex:
+        await i.response.send_message("Could not remove reward: "+str(ex)[:220],ephemeral=True)
 
 @bot.tree.command(name="approve-claim",description="Staff approve a verified ticket and issue a unique 7-digit code")
 @app_commands.guild_only()
