@@ -9,6 +9,7 @@ Set these as private environment variables. Never commit secrets or share them i
 - `DISCORD_BOT_TOKEN` — Discord bot token.
 - `SUPABASE_URL` — the Trigger Rewards Supabase project URL.
 - `SUPABASE_SERVICE_ROLE_KEY` — the private service-role key for the same Supabase project. **Botkeep only; never put this key in Vercel or browser code.**
+- `TRG_GUILD_ID` — your Discord server ID (`1499228791220863110`) so new slash commands sync immediately to your server.
 - `DEMO_URL` — optional; defaults to https://trigger-rewards.vercel.app.
 - `TICKET_DB_PATH` — optional SQLite path. Confirm Botkeep preserves this file across restarts if you use local ticket/claim history.
 
