@@ -163,8 +163,8 @@ async def auto_verify_falcon_report(message):
     embed = message.embeds[0]
     if (embed.title or "").strip().lower() != "invite log":
         return
-    match = re.search(r"has\\s+(\\d+)\\s+invites", embed.description or "", re.I)
-    requested = re.search(r"Requested by\\s+(.+?)(?:\\s*\\||$)", embed.footer.text or "", re.I)
+    match = re.search(r"has\s+(\d+)\s+invites", embed.description or "", re.I)
+    requested = re.search(r"Requested by\s+(.+?)(?:\s*\||$)", embed.footer.text or "", re.I)
     if not match or not requested:
         return
     invites = int(match.group(1))
@@ -238,7 +238,7 @@ async def auto_verify_falcon_report(message):
                 "Your reward code is being sent by DM. This ticket will be deleted in 15 seconds."
             )
             dm = discord.Embed(title="🎉 Your reward is approved!",
-                               description=f"**Reward:** {t['reward']}\\n**Your code:** ||{code}||\\n\\n"
+                               description=f"**Reward:** {t['reward']}\n**Your code:** ||{code}||\n\n"
                                            f"[Claim here]({SITE_URL})\\n\\nKeep this code private.",
                                color=0x57f287)
             try:
@@ -275,12 +275,11 @@ class CloseView(discord.ui.View):
         await i.response.send_message("🔒 Ticket closed.")
 
 @bot.event
-
-@bot.event
 async def on_message(message):
     await auto_verify_falcon_report(message)
     await bot.process_commands(message)
 
+@bot.event
 async def on_ready():
     bot.add_view(Panel()); bot.add_view(CloseView())
     try:
