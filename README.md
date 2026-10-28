@@ -1,41 +1,53 @@
 # Trigger Rewards Discord Ticket Bot
 
-A Discord ticket and reward-claim bot for Trigger Rewards. The bot uses private ticket channels, role-based staff access, configurable reward menus, staff-approved invite checks, unique seven-digit codes, and one-time redemption tracking.
+Discord ticket and reward-claim bot for Trigger Rewards. Reward categories and reward names are stored in the dedicated Supabase project and shared with the website.
 
-## Deploy on Botkeep
+## Botkeep environment variables
 
-1. Use this repository and set the startup file to `main.py`.
-2. Install dependencies from `requirements.txt`.
-3. Set these as private environment variables in Botkeep. Do not commit tokens or secret keys.
-   - `DISCORD_BOT_TOKEN` — Discord bot token.
-   - `DEMO_URL` — optional; defaults to https://trigger-rewards.vercel.app.
-   - `TICKET_DB_PATH` — optional; defaults to `trigger_rewards.sqlite3`.
-4. Invite the bot with the `bot` and `applications.commands` scopes. Give it View Channels, Send Messages, Embed Links, Read Message History, Manage Channels and Manage Roles only if needed. Enable Server Members Intent in the Developer Portal if required by your server.
-5. Restart the bot and wait for slash commands to sync.
+Set these as private environment variables. Never commit secrets or share them in chat.
 
-## First-time setup
+- `DISCORD_BOT_TOKEN` — Discord bot token.
+- `SUPABASE_URL` — the Trigger Rewards Supabase project URL.
+- `SUPABASE_SERVICE_ROLE_KEY` — the private service-role key for the same Supabase project. **Botkeep only; never put this key in Vercel or browser code.**
+- `DEMO_URL` — optional; defaults to https://trigger-rewards.vercel.app.
+- `TICKET_DB_PATH` — optional SQLite path. Confirm Botkeep preserves this file across restarts if you use local ticket/claim history.
 
-Run these commands as an administrator:
+Deploy this repository with startup file `main.py`, install `requirements.txt`, and restart the service after syncing the latest GitHub commit.
 
-1. `/staff-role role:@YourStaffRole` — staff can see tickets and approve claims.
-2. `/set-vouch-channel channel:#vouches` — configure the vouch channel.
-3. `/invite-requirement count:3` — choose the default invite requirement.
-4. Add reward choices with `/reward-add`, selecting a category, reward name and invite count.
-5. `/ticket-setup channel:#open-ticket category:TicketCategory` — post the public ticket panel.
+## Website environment variables
 
-Users click **Open Reward Ticket**, choose YouTube, Minecraft or OTT & Streaming, and then select a configured reward. The ticket is visible to its owner, staff role and the bot.
+In the Vercel project, configure:
 
-## Invite verification and codes
+- `SUPABASE_URL` — the same Trigger Rewards Supabase project URL.
+- `SUPABASE_ANON_KEY` — a public/anon/publishable key for read-only access protected by Supabase RLS.
+- `TRG_GUILD_ID` — your Discord server ID.
 
-The bot currently asks the user to run the server's invite-tracker command and requires staff to verify the tracker result before running `/approve-claim member:@User` inside that user's ticket. Automatic invite-tracker parsing is not enabled because the tracker bot's identity and exact response format must be configured and tested first. The bot does not invent invite counts.
+Never add `SUPABASE_SERVICE_ROLE_KEY` to the website. Redeploy after changing environment variables.
 
-Each user can receive only one code per reward. Codes are seven digits and are sent by DM inside Discord spoiler syntax. Staff can run `/redeem-code code:1234567` after the reward is redeemed; the code is then permanently marked redeemed and cannot be redeemed again.
+## Configure categories and rewards in Discord
+
+Run as a server administrator:
+
+1. `/category-add key:youtube label:"YouTube" emoji:▶️`
+2. `/reward-add category_key:youtube name:"Exact reward name" invites:10`
+3. Repeat `/reward-add` for every reward you want in that category.
+4. Use `/category-add` for each additional category.
+5. Use `/reward-remove` to hide a reward and `/category-remove` to hide a category and its rewards.
+6. Run `/ticket-setup` to post the ticket panel.
+
+The category key is a short stable slug using letters, numbers, hyphens or underscores. It is not the displayed category label. The website reads active categories and rewards from the shared Supabase database.
+
+## Ticket and invite verification
+
+Members open a private ticket, choose a configured category and reward, then show staff their Falcon invite output. Staff must manually verify the tracker result before running `/approve-claim member:@User` inside the ticket. Falcon output is not automatically parsed; invite counts are never guessed or automatically subtracted.
+
+Use `/staff-role` to configure ticket staff, `/set-vouch-channel` for vouches, and `/redeem-code` to mark a code redeemed.
 
 ## Important limitations
 
-- The bot's claim records currently use a local SQLite file. Confirm that your host preserves its files across restarts/redeploys; otherwise move the claims database to durable storage before using real rewards.
-- The website claim page is linked, but it is **not yet connected to the bot's claim database**. A code shown by the bot is not automatically validated by the website yet.
-- Invite results are staff-verified, not automatically parsed from the tracker bot.
-- Test the flow in a private test channel before using real rewards.
+- The website displays configured categories and rewards, but its code/timer pages are not yet a real code-validation or reward-fulfillment system.
+- Bot claims and issued codes are stored in local SQLite, not Supabase. Verify that Botkeep storage persists before relying on claim history.
+- Invite verification is staff-reviewed; Falcon data is not fetched or validated by the bot automatically.
+- Test the complete flow with dummy rewards before offering anything real.
 
-Never request Discord passwords, session tokens or 2FA codes. Keep bot tokens private.
+Never ask members for Discord passwords, session tokens, or 2FA codes.
