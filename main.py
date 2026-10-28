@@ -1,4 +1,4 @@
-import os, re, sqlite3, secrets, json, urllib.request, urllib.parse, urllib.error
+import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
@@ -153,6 +153,114 @@ class RewardChoices(discord.ui.View):
         e.set_footer(text="Verification is staff-checked for now; no invite count is guessed.")
         await i.response.send_message(embed=e,view=CloseView())
 
+
+async def auto_verify_falcon_report(message):
+    """Verify Falcon -i output in a reward ticket, then remove the ticket."""
+    if not message.guild or not isinstance(message.channel, discord.TextChannel):
+        return
+    if not message.author.bot or not message.embeds:
+        return
+    embed = message.embeds[0]
+    if (embed.title or "").strip().lower() != "invite log":
+        return
+    match = re.search(r"has\\s+(\\d+)\\s+invites", embed.description or "", re.I)
+    requested = re.search(r"Requested by\\s+(.+?)(?:\\s*\\||$)", embed.footer.text or "", re.I)
+    if not match or not requested:
+        return
+    invites = int(match.group(1))
+    requester_name = requested.group(1).strip().lstrip("@").lower()
+    c = database()
+    t = c.execute("SELECT * FROM tickets WHERE channel=? AND guild=? AND status='open'",
+                  (message.channel.id, message.guild.id)).fetchone()
+    c.close()
+    if not t or not t["reward"] or not t["category"]:
+        return
+    member = message.guild.get_member(t["user"])
+    if not member:
+        return
+    # Only trust a report that identifies the actual ticket owner.
+    accepted_names = {member.name.lower(), member.display_name.lower()}
+    if requester_name not in accepted_names:
+        return
+    # Avoid duplicate processing if Falcon posts the same report more than once.
+    c = database()
+    already = c.execute("SELECT id FROM claims WHERE guild=? AND user=? AND reward=?",
+                        (message.guild.id, member.id, t["reward"])).fetchone()
+    c.close()
+    try:
+        rewards = get_rewards(message.guild.id, t["category"])
+        reward = next((r for r in rewards if r["reward_name"] == t["reward"]), None)
+        if not reward:
+            await message.channel.send("⚠️ I couldn't find this reward's current invite requirement. Staff must check this ticket.")
+            return
+        required = int(reward.get("invite_requirement") or 0)
+        if already:
+            await message.channel.send("⚠️ A claim already exists for this reward. This ticket will not issue another code.")
+            return
+        if invites < required:
+            await message.channel.send(
+                f"❌ **Invite verification failed.** Falcon reported **{invites}** invites; "
+                f"**{required}** are required. This ticket will be deleted in 15 seconds."
+            )
+        else:
+            c = database()
+            code = None
+            for _ in range(30):
+                candidate = f"{secrets.randbelow(10_000_000):07d}"
+                try:
+                    c.execute("INSERT INTO claims(guild,user,reward,code,created) VALUES(?,?,?,?,?)",
+                              (message.guild.id, member.id, t["reward"], candidate,
+                               datetime.now(timezone.utc).isoformat()))
+                    c.commit()
+                    code = candidate
+                    break
+                except sqlite3.IntegrityError:
+                    continue
+            c.close()
+            if not code:
+                await message.channel.send("⚠️ Couldn't generate a unique reward code. Staff must check this ticket.")
+                return
+            try:
+                sb_request("trigger_reward_valid_codes", "POST", payload={
+                    "guild_id": str(message.guild.id), "category": t["category"],
+                    "reward_name": t["reward"], "code_value": code, "active": True
+                })
+            except Exception:
+                c = database()
+                c.execute("DELETE FROM claims WHERE guild=? AND user=? AND reward=? AND code=?",
+                          (message.guild.id, member.id, t["reward"], code))
+                c.commit()
+                c.close()
+                await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
+                return
+            await message.channel.send(
+                f"✅ **Invite verification passed!** Falcon reported **{invites}/{required}** required invites. "
+                "Your reward code is being sent by DM. This ticket will be deleted in 15 seconds."
+            )
+            dm = discord.Embed(title="🎉 Your reward is approved!",
+                               description=f"**Reward:** {t['reward']}\\n**Your code:** ||{code}||\\n\\n"
+                                           f"[Claim here]({SITE_URL})\\n\\nKeep this code private.",
+                               color=0x57f287)
+            try:
+                await member.send(embed=dm)
+            except discord.Forbidden:
+                await message.channel.send(f"{member.mention} I couldn't DM you. Your code is ||{code}||")
+        await asyncio.sleep(15)
+        c = database()
+        c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
+        c.commit()
+        c.close()
+        try:
+            await message.channel.delete(reason="Automatic invite verification completed")
+        except discord.Forbidden:
+            await message.channel.send("⚠️ Verification finished, but I can't delete this ticket. Give the bot Manage Channels permission.")
+    except Exception as ex:
+        print("Automatic invite verification failed:", repr(ex))
+        try:
+            await message.channel.send("⚠️ Automatic verification hit an error. Staff must check this ticket; it will not be deleted.")
+        except Exception:
+            pass
+
 class CloseView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="Close Ticket",style=discord.ButtonStyle.danger,emoji="🔒",custom_id="trg:close")
@@ -167,6 +275,12 @@ class CloseView(discord.ui.View):
         await i.response.send_message("🔒 Ticket closed.")
 
 @bot.event
+
+@bot.event
+async def on_message(message):
+    await auto_verify_falcon_report(message)
+    await bot.process_commands(message)
+
 async def on_ready():
     bot.add_view(Panel()); bot.add_view(CloseView())
     try:
