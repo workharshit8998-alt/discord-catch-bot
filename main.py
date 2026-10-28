@@ -11,6 +11,7 @@ SITE_URL = os.getenv("DEMO_URL", "https://trigger-rewards.vercel.app").strip()
 DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -169,9 +170,12 @@ class CloseView(discord.ui.View):
 async def on_ready():
     bot.add_view(Panel()); bot.add_view(CloseView())
     try:
-        synced=await bot.tree.sync()
-        print(f"Ready as {bot.user}; synced {len(synced)} commands")
-    except Exception as e: print(f"Command sync error: {e}")
+        guild = discord.Object(id=SYNC_GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Ready as {bot.user}; synced {len(synced)} commands to guild {SYNC_GUILD_ID}")
+    except Exception as e:
+        print(f"Command sync error: {e}")
 
 @bot.tree.command(name="ticket-setup",description="Post the Trigger Rewards ticket panel")
 @app_commands.guild_only()
