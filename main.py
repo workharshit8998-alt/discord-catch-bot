@@ -11,7 +11,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 DEMO_URL = os.getenv("DEMO_URL", "https://trigger-rewards.vercel.app").strip()
 REPORT_CHANNEL_ID = int(os.getenv("REPORT_CHANNEL_ID", "0") or "0")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_URL = os.getenv(\n    "SUPABASE_URL", "https://rhhvpyeowumfludgjcnw.supabase.co"\n).strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 intents = discord.Intents.default()
