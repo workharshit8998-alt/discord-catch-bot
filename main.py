@@ -264,6 +264,29 @@ class RewardEditModal(discord.ui.Modal, title="Edit Reward & Requirements"):
         except Exception as ex:
             await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
 
+
+class ValidCodeModal(discord.ui.Modal, title="Add Valid Reward Code"):
+    category = discord.ui.TextInput(label="Category key", placeholder="youtube", max_length=32)
+    reward = discord.ui.TextInput(label="Exact reward name", placeholder="10K YouTube Subscribers Account", max_length=120)
+    code = discord.ui.TextInput(label="Valid code to accept on website", placeholder="Enter the exact code", max_length=200)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        key = re.sub(r"[^a-z0-9_-]", "", str(self.category).lower().strip())
+        reward_name = str(self.reward).strip()
+        code_value = str(self.code).strip()
+        if not key or not reward_name or not code_value:
+            return await i.response.send_message("Fill in all fields.", ephemeral=True)
+        try:
+            category = next((x for x in get_categories(i.guild.id) if x["category_key"] == key), None)
+            reward = next((x for x in get_rewards(i.guild.id, key) if x["reward_name"] == reward_name), None)
+            if not category or not reward:
+                return await i.response.send_message("Category or exact reward name was not found. Check View Setup first.", ephemeral=True, view=AdminPanel())
+            sb_request("trigger_reward_valid_codes", "POST", payload={"guild_id":str(i.guild.id),"category":key,"reward_name":reward_name,"code_value":code_value,"active":True})
+            await i.response.send_message("✅ Valid code saved for **"+reward_name+"**. Other codes will show as incorrect.", ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not save code: "+str(ex)[:180], ephemeral=True)
+
 class AdminPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -278,6 +301,9 @@ class AdminPanel(discord.ui.View):
     @discord.ui.button(label="Add Reward", style=discord.ButtonStyle.success, emoji="🎁", row=0)
     async def add_reward(self, i: discord.Interaction, b: discord.ui.Button):
         await i.response.send_modal(RewardAddModal())
+    @discord.ui.button(label="Add Valid Code", style=discord.ButtonStyle.success, emoji="🔐", row=1)
+    async def add_valid_code(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(ValidCodeModal())
     @discord.ui.button(label="Edit Category", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
     async def edit_category(self, i: discord.Interaction, b: discord.ui.Button):
         await i.response.send_modal(CategoryEditModal())
@@ -307,7 +333,7 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
