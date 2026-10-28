@@ -177,6 +177,86 @@ async def on_ready():
     except Exception as e:
         print(f"Command sync error: {e}")
 
+
+class CategoryAddModal(discord.ui.Modal, title="Add Reward Category"):
+    key = discord.ui.TextInput(label="Category key", placeholder="youtube", max_length=32)
+    label = discord.ui.TextInput(label="Display name", placeholder="YouTube", max_length=80)
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="▶️", required=False, max_length=16)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        key = re.sub(r"[^a-z0-9_-]", "", str(self.key).lower().strip())
+        if len(key) < 2:
+            return await i.response.send_message("Use at least 2 letters/numbers for the category key.", ephemeral=True)
+        try:
+            sb_request("trigger_reward_categories", "POST", params={"on_conflict":"guild_id,category_key"}, payload={"guild_id":str(i.guild.id),"category_key":key,"category_label":str(self.label).strip(),"category_emoji":str(self.emoji).strip() or "🎁","active":True})
+            await i.response.send_message(f"✅ Category **{str(self.label).strip()}** saved. Add rewards from this panel.", ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not save category: " + str(ex)[:180], ephemeral=True)
+
+class RewardAddModal(discord.ui.Modal, title="Add Reward"):
+    name = discord.ui.TextInput(label="Exact reward name", placeholder="Minecraft Rank", max_length=80)
+    category = discord.ui.TextInput(label="Category key", placeholder="minecraft", max_length=32)
+    invites = discord.ui.TextInput(label="Required invites", placeholder="10", max_length=4)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        key = re.sub(r"[^a-z0-9_-]", "", str(self.category).lower().strip())
+        try:
+            count = int(str(self.invites).strip())
+            if count < 0 or count > 1000: raise ValueError()
+        except ValueError:
+            return await i.response.send_message("Invite requirement must be a whole number from 0 to 1000.", ephemeral=True)
+        try:
+            category = next((x for x in get_categories(i.guild.id) if x["category_key"] == key), None)
+            if not category:
+                return await i.response.send_message("Category key not found. Add the category first.", ephemeral=True, view=AdminPanel())
+            sb_request("trigger_rewards_config", "POST", params={"on_conflict":"guild_id,category,reward_name"}, payload={"guild_id":str(i.guild.id),"category":key,"category_label":category["category_label"],"category_emoji":category.get("category_emoji") or "🎁","reward_name":str(self.name).strip(),"invite_requirement":count,"active":True})
+            await i.response.send_message(f"✅ Added **{str(self.name).strip()}** to **{category['category_label']}** — {count} invites required.", ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not save reward: " + str(ex)[:180], ephemeral=True)
+
+class AdminPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+    async def interaction_check(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+            return False
+        return True
+    @discord.ui.button(label="Add Category", style=discord.ButtonStyle.primary, emoji="🗂️", row=0)
+    async def add_category(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(CategoryAddModal())
+    @discord.ui.button(label="Add Reward", style=discord.ButtonStyle.success, emoji="🎁", row=0)
+    async def add_reward(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(RewardAddModal())
+    @discord.ui.button(label="View Setup", style=discord.ButtonStyle.secondary, emoji="📊", row=0)
+    async def view_setup(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            cats = get_categories(i.guild.id)
+            rewards = get_rewards(i.guild.id)
+            e = discord.Embed(title="📊 Trigger Rewards Configuration", color=0xf2b84b)
+            e.add_field(name=f"Categories ({len(cats)})", value="\\n".join(f"{x.get('category_emoji','🎁')} **{x['category_label']}** · {x['category_key']}" for x in cats[:15]) or "No categories yet.", inline=False)
+            e.add_field(name=f"Active rewards ({len(rewards)})", value="\\n".join(f"• **{x['reward_name']}** — {x['invite_requirement']} invites ({x['category']})" for x in rewards[:20]) or "No rewards yet.", inline=False)
+            e.set_footer(text="Use buttons to add more. /category-remove and /reward-remove can hide entries.")
+            await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not read configuration: " + str(ex)[:180], ephemeral=True)
+    @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=1)
+    async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
+        e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\\n2. Optionally choose a Discord category for new ticket channels.\\n3. Run /staff-role to set who can view tickets.\\n4. Add categories and rewards here.\\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
+        await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
+
+@bot.tree.command(name="admin-panel", description="Open the embedded Trigger Rewards admin control panel")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def admin_panel(i: discord.Interaction):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\\n\\nCategories — create a category key, label and emoji.\\nRewards — add a reward with its exact name and invite requirement.\\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
+    await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
+
 @bot.tree.command(name="ticket-setup",description="Post the Trigger Rewards ticket panel")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
