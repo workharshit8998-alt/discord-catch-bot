@@ -216,6 +216,54 @@ class RewardAddModal(discord.ui.Modal, title="Add Reward"):
         except Exception as ex:
             await i.response.send_message("Could not save reward: " + str(ex)[:180], ephemeral=True)
 
+
+class CategoryEditModal(discord.ui.Modal, title="Edit Reward Category"):
+    key = discord.ui.TextInput(label="Existing category key", placeholder="youtube", max_length=32)
+    label = discord.ui.TextInput(label="New display name", placeholder="YouTube Reward", max_length=80)
+    emoji = discord.ui.TextInput(label="New emoji", placeholder="▶️", required=False, max_length=16)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        key = re.sub(r"[^a-z0-9_-]", "", str(self.key).lower().strip())
+        label = str(self.label).strip()
+        try:
+            cats = get_categories(i.guild.id)
+            cat = next((x for x in cats if x["category_key"] == key), None)
+            if not cat: return await i.response.send_message("Category key not found.", ephemeral=True, view=AdminPanel())
+            emoji = str(self.emoji).strip() or cat.get("category_emoji") or "🎁"
+            sb_request("trigger_reward_categories", "PATCH", params={"guild_id":f"eq.{i.guild.id}","category_key":f"eq.{key}"}, payload={"category_label":label,"category_emoji":emoji,"active":True})
+            sb_request("trigger_rewards_config", "PATCH", params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}"}, payload={"category_label":label,"category_emoji":emoji})
+            await i.response.send_message(f"✅ Updated **{label}**. Website category and its reward labels are synced.", ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not edit category: " + str(ex)[:180], ephemeral=True)
+
+class RewardEditModal(discord.ui.Modal, title="Edit Reward & Requirements"):
+    category = discord.ui.TextInput(label="Category key", placeholder="youtube", max_length=32)
+    current_name = discord.ui.TextInput(label="Current exact reward name", placeholder="10K YouTube Subscribers Account", max_length=80)
+    new_name = discord.ui.TextInput(label="New reward name", placeholder="10K Subscribers", max_length=80)
+    invites = discord.ui.TextInput(label="Required invites (0-1000)", placeholder="3", max_length=4)
+    details = discord.ui.TextInput(label="Reward text / code / notes", placeholder="Paste reward text here (optional)", required=False, style=discord.TextStyle.paragraph, max_length=1000)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        key = re.sub(r"[^a-z0-9_-]", "", str(self.category).lower().strip())
+        old = str(self.current_name).strip()
+        name = str(self.new_name).strip()
+        try:
+            count = int(str(self.invites).strip())
+            if count < 0 or count > 1000: raise ValueError()
+        except ValueError:
+            return await i.response.send_message("Invite requirement must be a whole number from 0 to 1000.", ephemeral=True)
+        try:
+            cat = next((x for x in get_categories(i.guild.id) if x["category_key"] == key), None)
+            if not cat: return await i.response.send_message("Category key not found.", ephemeral=True, view=AdminPanel())
+            found = next((x for x in get_rewards(i.guild.id, key) if x["reward_name"] == old), None)
+            if not found: return await i.response.send_message("Existing reward not found. Use Add Reward to create it.", ephemeral=True, view=AdminPanel())
+            sb_request("trigger_rewards_config", "PATCH", params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}","reward_name":f"eq.{old}"}, payload={"reward_name":name,"invite_requirement":count,"reward_text":str(self.details).strip(),"active":True})
+            await i.response.send_message(f"✅ Updated **{name}** · {count} required invites. Reward text saved.", ephemeral=True, view=AdminPanel())
+        except Exception as ex:
+            await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
+
 class AdminPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -230,6 +278,12 @@ class AdminPanel(discord.ui.View):
     @discord.ui.button(label="Add Reward", style=discord.ButtonStyle.success, emoji="🎁", row=0)
     async def add_reward(self, i: discord.Interaction, b: discord.ui.Button):
         await i.response.send_modal(RewardAddModal())
+    @discord.ui.button(label="Edit Category", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
+    async def edit_category(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(CategoryEditModal())
+    @discord.ui.button(label="Edit Reward", style=discord.ButtonStyle.success, emoji="🛠️", row=1)
+    async def edit_reward(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(RewardEditModal())
     @discord.ui.button(label="View Setup", style=discord.ButtonStyle.secondary, emoji="📊", row=0)
     async def view_setup(self, i: discord.Interaction, b: discord.ui.Button):
         try:
@@ -242,7 +296,7 @@ class AdminPanel(discord.ui.View):
             await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
         except Exception as ex:
             await i.response.send_message("Could not read configuration: " + str(ex)[:180], ephemeral=True)
-    @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=1)
+    @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=2)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
         e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\n2. Optionally choose a Discord category for new ticket channels.\n3. Run /staff-role to set who can view tickets.\n4. Add categories and rewards here.\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
         await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
@@ -253,7 +307,7 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — create a category key, label and emoji.\nRewards — add a reward with its exact name and invite requirement.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
