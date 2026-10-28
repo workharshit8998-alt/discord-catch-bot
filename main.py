@@ -438,7 +438,27 @@ async def approve(i:discord.Interaction,member:discord.Member):
         except sqlite3.IntegrityError: pass
     c.close()
     if not code: return await i.response.send_message("Could not generate a unique code; try again.",ephemeral=True)
-    await i.response.send_message(f"Approved claim for {member.mention}.",ephemeral=True)
+    # Register the same code in the website's verifier before telling the user it is valid.
+    try:
+        ticket_category = (t["category"] or "").strip()
+        reward_name = (t["reward"] or "").strip()
+        if not ticket_category or not reward_name:
+            raise RuntimeError("The ticket is missing its category or reward name.")
+        sb_request("trigger_reward_valid_codes", "POST", payload={
+            "guild_id": str(i.guild.id),
+            "category": ticket_category,
+            "reward_name": reward_name,
+            "code_value": code,
+            "active": True
+        })
+    except Exception as ex:
+        c = database()
+        c.execute("DELETE FROM claims WHERE guild=? AND user=? AND reward=? AND code=?",
+                  (i.guild.id, member.id, t["reward"], code))
+        c.commit()
+        c.close()
+        return await i.response.send_message("Could not register this code on the website, so it was not issued. Check Botkeep Supabase variables and try again. Details: " + str(ex)[:120], ephemeral=True)
+    await i.response.send_message(f"Approved claim for {member.mention}. Code generated and registered on the website.",ephemeral=True)
     e=discord.Embed(title="🎉 Your reward is approved!",description=f"**Reward:** {t['reward']}\n**Your code:** ||{code}||\n\n[Claim here]({SITE_URL})\n\nKeep this code private. It is unique to you and this reward.",color=0x57f287)
     try: await member.send(embed=e)
     except discord.Forbidden: await i.channel.send(f"{member.mention} I couldn't DM you. Your code is ||{code}||")
@@ -460,8 +480,21 @@ async def redeem(i:discord.Interaction,code:str):
     c=database(); row=c.execute("SELECT * FROM claims WHERE guild=? AND code=?",(i.guild.id,code)).fetchone()
     if not row: c.close(); return await i.response.send_message("Code not found.",ephemeral=True)
     if row["status"]=="redeemed": c.close(); return await i.response.send_message("This code was already redeemed and is permanently invalid.",ephemeral=True)
+    # Invalidate the matching website code as well, so it cannot be submitted again.
+    try:
+        tickets = sb_request("trigger_reward_valid_codes", "GET", params={
+            "select":"id,category,reward_name,code_value,active",
+            "guild_id":"eq."+str(i.guild.id),
+            "code_value":"eq."+code,
+            "active":"eq.true"
+        })
+        for item in tickets:
+            sb_request("trigger_reward_valid_codes", "PATCH", params={"id":"eq."+str(item["id"])}, payload={"active":False})
+    except Exception as ex:
+        c.close()
+        return await i.response.send_message("Website code could not be invalidated, so the local claim was left unchanged. Try again. Details: " + str(ex)[:120],ephemeral=True)
     c.execute("UPDATE claims SET status='redeemed',redeemed=? WHERE id=?",(datetime.now(timezone.utc).isoformat(),row["id"])); c.commit(); c.close()
-    await i.response.send_message(f"Code redeemed and invalidated. Reward: **{row['reward']}**.",ephemeral=True)
+    await i.response.send_message(f"Code redeemed and invalidated on the website. Reward: **{row['reward']}**.",ephemeral=True)
 
 @bot.tree.command(name="close-ticket",description="Close your current reward ticket")
 @app_commands.guild_only()
