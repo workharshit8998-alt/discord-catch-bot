@@ -236,15 +236,15 @@ class AdminPanel(discord.ui.View):
             cats = get_categories(i.guild.id)
             rewards = get_rewards(i.guild.id)
             e = discord.Embed(title="📊 Trigger Rewards Configuration", color=0xf2b84b)
-            e.add_field(name=f"Categories ({len(cats)})", value="\\n".join(f"{x.get('category_emoji','🎁')} **{x['category_label']}** · {x['category_key']}" for x in cats[:15]) or "No categories yet.", inline=False)
-            e.add_field(name=f"Active rewards ({len(rewards)})", value="\\n".join(f"• **{x['reward_name']}** — {x['invite_requirement']} invites ({x['category']})" for x in rewards[:20]) or "No rewards yet.", inline=False)
+            e.add_field(name=f"Categories ({len(cats)})", value="\n".join(f"{x.get('category_emoji','🎁')} **{x['category_label']}** · {x['category_key']}" for x in cats[:15]) or "No categories yet.", inline=False)
+            e.add_field(name=f"Active rewards ({len(rewards)})", value="\n".join(f"• **{x['reward_name']}** — {x['invite_requirement']} invites ({x['category']})" for x in rewards[:20]) or "No rewards yet.", inline=False)
             e.set_footer(text="Use buttons to add more. /category-remove and /reward-remove can hide entries.")
             await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
         except Exception as ex:
             await i.response.send_message("Could not read configuration: " + str(ex)[:180], ephemeral=True)
     @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=1)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
-        e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\\n2. Optionally choose a Discord category for new ticket channels.\\n3. Run /staff-role to set who can view tickets.\\n4. Add categories and rewards here.\\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
+        e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\n2. Optionally choose a Discord category for new ticket channels.\n3. Run /staff-role to set who can view tickets.\n4. Add categories and rewards here.\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
         await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
 
 @bot.tree.command(name="admin-panel", description="Open the embedded Trigger Rewards admin control panel")
@@ -253,7 +253,7 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\\n\\nCategories — create a category key, label and emoji.\\nRewards — add a reward with its exact name and invite requirement.\\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — create a category key, label and emoji.\nRewards — add a reward with its exact name and invite requirement.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
