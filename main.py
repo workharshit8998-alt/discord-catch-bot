@@ -55,7 +55,38 @@ def database():
     CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, reward TEXT, code TEXT UNIQUE, status TEXT DEFAULT 'issued', created TEXT, redeemed TEXT, UNIQUE(guild,user,reward));
     """)
     c.commit()
+    # Migrate older databases: users may claim the same reward again after its cooldown.
+    schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'").fetchone()
+    if schema and "UNIQUE(guild,user,reward)" in (schema["sql"] or "").replace(" ", ""):
+        c.executescript("""
+        ALTER TABLE claims RENAME TO claims_old;
+        CREATE TABLE claims(id INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, reward TEXT, code TEXT UNIQUE, status TEXT DEFAULT 'issued', created TEXT, redeemed TEXT);
+        INSERT INTO claims(id,guild,user,reward,code,status,created,redeemed)
+          SELECT id,guild,user,reward,code,status,created,redeemed FROM claims_old;
+        DROP TABLE claims_old;
+        """)
+        c.commit()
+    c.execute("""CREATE TABLE IF NOT EXISTS reward_cooldowns(
+        guild INTEGER NOT NULL, user INTEGER NOT NULL, reward TEXT NOT NULL,
+        last_claim TEXT NOT NULL, PRIMARY KEY(guild,user,reward)
+    )""")
+    c.commit()
     return c
+
+def cooldown_seconds(c, guild_id, user_id, reward_name):
+    row = c.execute(
+        "SELECT last_claim FROM reward_cooldowns WHERE guild=? AND user=? AND reward=?",
+        (guild_id, user_id, reward_name)
+    ).fetchone()
+    if not row:
+        return 0
+    try:
+        last = datetime.fromisoformat(row["last_claim"])
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return max(0, 120 - int((datetime.now(timezone.utc) - last).total_seconds()))
+    except (TypeError, ValueError):
+        return 0
 
 def cfg(guild):
     c=database()
@@ -150,9 +181,14 @@ class RewardChoices(discord.ui.View):
             return await i.response.send_message("Could not verify reward: "+str(ex)[:180],ephemeral=True)
         if not t or t["user"]!=i.user.id or not r:
             c.close(); return await i.response.send_message("Ticket/reward is no longer valid.",ephemeral=True)
-        prior=c.execute("SELECT status FROM claims WHERE guild=? AND user=? AND reward=?",(i.guild.id,i.user.id,name)).fetchone()
-        if prior:
-            c.close(); return await i.response.send_message("You already claimed this reward. Duplicate claims are blocked.",ephemeral=True)
+        remaining = cooldown_seconds(c, i.guild.id, i.user.id, name)
+        if remaining:
+            c.close()
+            return await i.response.send_message(
+                f"⏳ You can claim **{name}** again in **{remaining // 60}:{remaining % 60:02d}**. "
+                "Each reward has its own 2-minute cooldown.",
+                ephemeral=True
+            )
         c.execute("UPDATE tickets SET reward=? WHERE channel=?",(name,i.channel_id)); c.commit(); c.close()
         e=discord.Embed(title="📋 Invite Requirement",description=f"**Reward:** {name}\n**Required invites:** {r['invite_requirement']}\n\nRun your invite tracker bot's -i command, then wait for staff to verify the result in this ticket. Staff will use /approve-claim after checking the tracker output.",color=0x5865f2)
         e.set_footer(text="Verification is staff-checked for now; no invite count is guessed.")
@@ -187,10 +223,9 @@ async def auto_verify_falcon_report(message):
     accepted_names = {member.name.lower(), member.display_name.lower()}
     if requester_name not in accepted_names:
         return
-    # Avoid duplicate processing if Falcon posts the same report more than once.
+    # Enforce a separate 2-minute cooldown for each reward, rather than a lifetime claim limit.
     c = database()
-    already = c.execute("SELECT id FROM claims WHERE guild=? AND user=? AND reward=?",
-                        (message.guild.id, member.id, t["reward"])).fetchone()
+    remaining = cooldown_seconds(c, message.guild.id, member.id, t["reward"])
     c.close()
     try:
         rewards = get_rewards(message.guild.id, t["category"])
@@ -199,8 +234,11 @@ async def auto_verify_falcon_report(message):
             await message.channel.send("⚠️ I couldn't find this reward's current invite requirement. Staff must check this ticket.")
             return
         required = int(reward.get("invite_requirement") or 0)
-        if already:
-            await message.channel.send("⚠️ A claim already exists for this reward. This ticket will not issue another code.")
+        if remaining:
+            await message.channel.send(
+                f"⏳ This reward is on cooldown for this member. Try again in "
+                f"**{remaining // 60}:{remaining % 60:02d}**."
+            )
             return
         if invites < required:
             await message.channel.send(
@@ -213,9 +251,14 @@ async def auto_verify_falcon_report(message):
             for _ in range(30):
                 candidate = f"{secrets.randbelow(1_000_000_000_000):012d}"
                 try:
+                    now_iso = datetime.now(timezone.utc).isoformat()
                     c.execute("INSERT INTO claims(guild,user,reward,code,created) VALUES(?,?,?,?,?)",
-                              (message.guild.id, member.id, t["reward"], candidate,
-                               datetime.now(timezone.utc).isoformat()))
+                              (message.guild.id, member.id, t["reward"], candidate, now_iso))
+                    c.execute(
+                        "INSERT INTO reward_cooldowns(guild,user,reward,last_claim) VALUES(?,?,?,?) "
+                        "ON CONFLICT(guild,user,reward) DO UPDATE SET last_claim=excluded.last_claim",
+                        (message.guild.id, member.id, t["reward"], now_iso)
+                    )
                     c.commit()
                     code = candidate
                     break
@@ -318,6 +361,12 @@ async def capture_legit_evidence(message):
             if item.attachments:
                 content += ("\n" if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
             content = content.strip() or "[embed / attachment]"
+            # Render Markdown as readable chat text instead of raw **bold** and link syntax.
+            content = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", content)
+            content = re.sub(r"<@!?(\d+)>", "@member", content)
+            content = re.sub(r"<#(\d+)>", "#channel", content)
+            content = content.replace("**", "").replace("__", "").replace("~~", "").replace(chr(96), "")
+            content = re.sub(r"(?m)^\s*>\s?", "", content)
             safe = content.encode("latin-1", "replace").decode("latin-1")
             body = []
             for paragraph in safe.splitlines() or [""]:
