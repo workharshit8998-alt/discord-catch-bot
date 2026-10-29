@@ -268,7 +268,7 @@ async def auto_verify_falcon_report(message):
             c = database()
             code = None
             for _ in range(30):
-                candidate = f"{secrets.randbelow(1_000_000_000_000):012d}"
+                candidate = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(12))
                 try:
                     now_iso = datetime.now(timezone.utc).isoformat()
                     c.execute("INSERT INTO claims(guild,user,reward,code,created) VALUES(?,?,?,?,?)",
@@ -796,7 +796,8 @@ async def reward_remove(i:discord.Interaction,category_key:app_commands.Range[st
 @app_commands.guild_only()
 async def redeem(i:discord.Interaction,code:str):
     if not i.guild or not staff(i): return await i.response.send_message("Staff only.",ephemeral=True)
-    if not re.fullmatch(r"\d{7}",code): return await i.response.send_message("Code must be exactly 7 digits.",ephemeral=True)
+    if not re.fullmatch(r"[A-Z0-9]{12}",code.upper()): return await i.response.send_message("Code must be exactly 12 capital letters/numbers.",ephemeral=True)
+    code = code.upper()
     c=database(); row=c.execute("SELECT * FROM claims WHERE guild=? AND code=?",(i.guild.id,code)).fetchone()
     if not row: c.close(); return await i.response.send_message("Code not found.",ephemeral=True)
     if row["status"]=="redeemed": c.close(); return await i.response.send_message("This code was already redeemed and is permanently invalid.",ephemeral=True)
