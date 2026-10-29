@@ -300,12 +300,14 @@ async def auto_verify_falcon_report(message):
                 c.close()
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
-            # Save Falcon's cumulative total only after code registration succeeds.
+            # Consume only the invite requirement for this reward, not the entire cumulative total.
+            # This preserves any surplus invites for the member's next claim.
             c = database()
+            next_baseline = baseline + required
             c.execute(
                 "INSERT INTO invite_baselines(guild,user,baseline,updated) VALUES(?,?,?,?) "
                 "ON CONFLICT(guild,user) DO UPDATE SET baseline=excluded.baseline, updated=excluded.updated",
-                (message.guild.id, member.id, invites, datetime.now(timezone.utc).isoformat())
+                (message.guild.id, member.id, next_baseline, datetime.now(timezone.utc).isoformat())
             )
             c.commit()
             c.close()
