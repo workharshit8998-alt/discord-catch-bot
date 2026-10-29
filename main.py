@@ -14,6 +14,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 CATS = {"youtube": ("▶️", "YouTube"), "minecraft": ("🟩", "Minecraft"), "streaming": ("📺", "OTT & Streaming")}
 
@@ -234,8 +235,9 @@ async def auto_verify_falcon_report(message):
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
             await message.channel.send(
-                f"✅ **Invite verification passed!** Falcon reported **{invites}/{required}** required invites. "
-                "Your reward code is being sent by DM. This ticket will be deleted in 15 seconds."
+                f"✅ **Invite verification passed!** Falcon reported **{invites}/{required}** required invites.\n"
+                f"**Your reward code:** ||{code}||\n"
+                "The same code has also been sent to your DM. This ticket will be deleted in 15 seconds."
             )
             dm = discord.Embed(title="🎉 Your reward is approved!",
                                description=f"**Reward:** {t['reward']}\n**Your code:** ||{code}||\n\n"
@@ -534,85 +536,6 @@ async def reward_remove(i:discord.Interaction,category_key:app_commands.Range[st
         await i.response.send_message("Reward hidden." if rows else "Reward not found.",ephemeral=True)
     except Exception as ex:
         await i.response.send_message("Could not remove reward: "+str(ex)[:220],ephemeral=True)
-
-@bot.tree.command(name="approve-claim",description="Staff approve a verified ticket and issue a unique 7-digit code")
-@app_commands.guild_only()
-async def approve(i:discord.Interaction,member:discord.Member):
-    if not i.guild or not staff(i): return await i.response.send_message("Only configured staff or admins can approve claims.",ephemeral=True)
-    c=database(); t=c.execute("SELECT * FROM tickets WHERE channel=? AND guild=? AND user=? AND status='open'",(i.channel_id,i.guild.id,member.id)).fetchone()
-    if not t or not t["reward"]: c.close(); return await i.response.send_message("Run this inside the member's open ticket after they choose a reward.",ephemeral=True)
-    old=c.execute("SELECT status,code FROM claims WHERE guild=? AND user=? AND reward=?",(i.guild.id,member.id,t["reward"])).fetchone()
-    if old:
-        c.close()
-        if old["status"] == "redeemed":
-            return await i.response.send_message("This reward code has already been redeemed and cannot be issued again.",ephemeral=True)
-        existing_code = old["code"]
-        if not existing_code:
-            return await i.response.send_message("An existing claim record has no code. Ask an administrator to inspect the claim database.",ephemeral=True)
-        # Re-deliver the same claim; never create a second claim for the same reward.
-        try:
-            rows = sb_request("trigger_reward_valid_codes", "GET", params={
-                "select":"id,active", "guild_id":"eq."+str(i.guild.id),
-                "category":"eq."+str(t["category"]), "reward_name":"eq."+str(t["reward"]),
-                "code_value":"eq."+str(existing_code)
-            })
-            if not rows:
-                sb_request("trigger_reward_valid_codes", "POST", payload={
-                    "guild_id":str(i.guild.id), "category":t["category"],
-                    "reward_name":t["reward"], "code_value":existing_code, "active":True
-                })
-            elif not any(row.get("active") for row in rows):
-                return await i.response.send_message("The existing code is inactive, so it cannot be reissued. An administrator must review it.",ephemeral=True)
-        except Exception as ex:
-            return await i.response.send_message("Couldn't confirm the existing code on the website. No new claim was created. Details: "+str(ex)[:120],ephemeral=True)
-        await i.response.send_message(f"Existing claim found for {member.mention}; I’m resending the same code, not creating another claim.",ephemeral=True)
-        e=discord.Embed(title="🎉 Your existing reward claim",description=f"**Reward:** {t['reward']}\\n**Your code:** ||{existing_code}||\\n\\n[Claim here]({SITE_URL})\\n\\nThis is your original code; duplicate claims are blocked.",color=0x57f287)
-        try:
-            await member.send(embed=e)
-        except discord.Forbidden:
-            await i.channel.send(f"{member.mention} I couldn't DM you. Your existing code is ||{existing_code}||")
-        return
-    code=None
-    for _ in range(30):
-        candidate=f"{secrets.randbelow(10_000_000):07d}"
-        try:
-            c.execute("INSERT INTO claims(guild,user,reward,code,created) VALUES(?,?,?,?,?)",(i.guild.id,member.id,t["reward"],candidate,datetime.now(timezone.utc).isoformat())); c.commit(); code=candidate; break
-        except sqlite3.IntegrityError: pass
-    c.close()
-    if not code: return await i.response.send_message("Could not generate a unique code; try again.",ephemeral=True)
-    # Register the same code in the website's verifier before telling the user it is valid.
-    try:
-        ticket_category = (t["category"] or "").strip()
-        reward_name = (t["reward"] or "").strip()
-        if not ticket_category or not reward_name:
-            raise RuntimeError("The ticket is missing its category or reward name.")
-        sb_request("trigger_reward_valid_codes", "POST", payload={
-            "guild_id": str(i.guild.id),
-            "category": ticket_category,
-            "reward_name": reward_name,
-            "code_value": code,
-            "active": True
-        })
-    except Exception as ex:
-        c = database()
-        c.execute("DELETE FROM claims WHERE guild=? AND user=? AND reward=? AND code=?",
-                  (i.guild.id, member.id, t["reward"], code))
-        c.commit()
-        c.close()
-        return await i.response.send_message("Could not register this code on the website, so it was not issued. Check Botkeep Supabase variables and try again. Details: " + str(ex)[:120], ephemeral=True)
-    await i.response.send_message(f"Approved claim for {member.mention}. Code generated and registered on the website.",ephemeral=True)
-    e=discord.Embed(title="🎉 Your reward is approved!",description=f"**Reward:** {t['reward']}\n**Your code:** ||{code}||\n\n[Claim here]({SITE_URL})\n\nKeep this code private. It is unique to you and this reward.",color=0x57f287)
-    try: await member.send(embed=e)
-    except discord.Forbidden: await i.channel.send(f"{member.mention} I couldn't DM you. Your code is ||{code}||")
-    await i.channel.send(embed=discord.Embed(title="💛 Leave a vouch",description=f"If you received your reward, please leave a vouch in the configured vouch channel. Example: Legit got {t['reward']} from TriggerPlayz.",color=0xf2b84b),view=CloseView())
-
-@bot.tree.command(name="set-vouch-channel",description="Set the vouch channel")
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def set_vouch(i:discord.Interaction,channel:discord.TextChannel):
-    if not i.guild or not i.user.guild_permissions.administrator: return await i.response.send_message("Administrator only.",ephemeral=True)
-    c=database(); c.execute("INSERT INTO settings(guild,vouch_channel) VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET vouch_channel=excluded.vouch_channel",(i.guild.id,channel.id)); c.commit(); c.close()
-    await i.response.send_message(f"Vouch channel set to {channel.mention}.",ephemeral=True)
 
 @bot.tree.command(name="redeem-code",description="Staff permanently invalidate a code after redemption")
 @app_commands.guild_only()
