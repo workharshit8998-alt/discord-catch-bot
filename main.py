@@ -706,6 +706,13 @@ class VouchTemplateModal(discord.ui.Modal):
         if not template:
             return await i.response.send_message("Vouch message cannot be empty.", ephemeral=True)
         try:
+            template.format(reward="REWARD", user="@user", ticket="ticket")
+        except (KeyError, ValueError, IndexError):
+            return await i.response.send_message(
+                "The template has invalid braces or placeholders. Use only {reward}, {user}, and {ticket}.",
+                ephemeral=True
+            )
+        try:
             save_vouch_template(i.guild.id, template)
             await i.response.send_message(
                 "✅ Vouch message saved. Available placeholders: {reward}, {user}, {ticket}.",
