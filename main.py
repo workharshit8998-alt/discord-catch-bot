@@ -295,7 +295,7 @@ async def capture_legit_evidence(message):
     c.commit()
     c.close()
     try:
-        history = [m async for m in message.channel.history(limit=15, oldest_first=True)]
+        history = [m async for m in message.channel.history(limit=25, oldest_first=True)]
         lines = []
         for item in history:
             stamp = item.created_at.strftime("%Y-%m-%d %H:%M UTC")
@@ -343,7 +343,7 @@ async def capture_legit_evidence(message):
             target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
         embed = discord.Embed(
             title="✅ Reward Vouch Received",
-            description=f"**Member:** {message.author.mention}\\n**Reward:** {ticket['reward']}\\n**Ticket:** #{message.channel.name}\\n**Vouch:** Legit",
+            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit",
             color=0xf2b84b
         )
         await target.send(embed=embed, file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
