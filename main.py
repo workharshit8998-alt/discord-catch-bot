@@ -210,7 +210,7 @@ async def auto_verify_falcon_report(message):
             c = database()
             code = None
             for _ in range(30):
-                candidate = f"{secrets.randbelow(10_000_000):07d}"
+                candidate = f"{secrets.randbelow(1_000_000_000_000):012d}"
                 try:
                     c.execute("INSERT INTO claims(guild,user,reward,code,created) VALUES(?,?,?,?,?)",
                               (message.guild.id, member.id, t["reward"], candidate,
@@ -303,45 +303,56 @@ async def capture_legit_evidence(message):
     c.close()
     try:
         history = [m async for m in message.channel.history(limit=25, oldest_first=True)]
-        lines = []
+        messages = []
         for item in history:
-            stamp = item.created_at.strftime("%Y-%m-%d %H:%M UTC")
-            author = str(item.author.display_name)
+            stamp = item.created_at.strftime("%I:%M %p").lstrip("0")
             content = item.content or ""
             for emb in item.embeds[:2]:
                 if emb.title:
-                    content += (" " if content else "") + emb.title
+                    content += ("\n" if content else "") + emb.title
                 if emb.description:
-                    content += (" " if content else "") + emb.description
+                    content += ("\n" if content else "") + emb.description
+                for field in emb.fields[:5]:
+                    content += ("\n" if content else "") + f"{field.name}: {field.value}"
             if item.attachments:
-                content += (" " if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
+                content += ("\n" if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
             content = content.strip() or "[embed / attachment]"
-            # Use a plain transcript image for broad font compatibility; escape non-latin glyphs if the default font cannot draw them.
             safe = content.encode("latin-1", "replace").decode("latin-1")
-            lines.append((stamp + "  " + author, textwrap.wrap(safe, width=78) or [""]))
-        width = 1000
-        padding = 32
-        row_height = 26
-        total_lines = sum(1 + len(body) for _, body in lines)
-        height = max(320, 150 + total_lines * row_height)
-        image = Image.new("RGB", (width, min(height, 5000)), (16, 17, 20))
-        draw = ImageDraw.Draw(image)
+            body = []
+            for paragraph in safe.splitlines() or [""]:
+                body.extend(textwrap.wrap(paragraph, width=72) or [""])
+            messages.append((item.author.display_name.encode("latin-1", "replace").decode("latin-1"),
+                             stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?"))
+        width, padding = 1000, 34
         font = ImageFont.load_default()
-        draw.text((padding, 24), "TRIGGER REWARDS  |  CLAIM VOUCH EVIDENCE", fill=(242, 184, 75), font=font)
-        draw.text((padding, 54), "Member: " + message.author.display_name.encode("latin-1", "replace").decode("latin-1"), fill=(245, 245, 245), font=font)
-        draw.text((padding, 78), "Reward: " + str(ticket["reward"]).encode("latin-1", "replace").decode("latin-1"), fill=(245, 245, 245), font=font)
-        draw.text((padding, 102), "Member message: Legit", fill=(100, 230, 145), font=font)
-        y = 145
-        for heading, body in lines:
-            if y > image.height - 30:
+        row_heights = [max(76, 48 + len(body) * 25) for _, _, body, _, _ in messages]
+        height = max(440, 132 + sum(row_heights) + 80)
+        image = Image.new("RGB", (width, min(height, 6000)), (49, 51, 56))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, width, 66), fill=(35, 36, 40))
+        draw.text((padding, 24), "#  " + message.channel.name, fill=(245, 245, 247), font=font)
+        draw.line((padding, 67, width-padding, 67), fill=(25, 26, 29), width=2)
+        draw.text((padding, 86), "October " + message.created_at.strftime("%d, %Y"), fill=(160, 163, 170), font=font)
+        y = 122
+        palette = [(88, 101, 242), (235, 69, 158), (87, 242, 135), (242, 184, 75)]
+        for idx, (author, stamp, body, is_bot, initial) in enumerate(messages):
+            row_h = row_heights[idx]
+            if y + row_h > image.height - 20:
                 break
-            draw.text((padding, y), heading.encode("latin-1", "replace").decode("latin-1")[:110], fill=(105, 190, 255), font=font)
-            y += row_height
+            avatar_color = palette[idx % len(palette)]
+            draw.ellipse((padding, y + 4, padding + 42, y + 46), fill=avatar_color)
+            draw.text((padding + 16, y + 18), initial, fill=(255, 255, 255), font=font)
+            name_color = (88, 101, 242) if is_bot else (240, 240, 242)
+            draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font)
+            name_width = draw.textbbox((padding + 58, y + 4), author[:42], font=font)[2]
+            draw.text((min(name_width + 12, width - 150), y + 4), stamp, fill=(163, 166, 173), font=font)
+            text_y = y + 30
             for line in body:
-                if y > image.height - 30:
+                if text_y > image.height - 25:
                     break
-                draw.text((padding + 16, y), line[:120], fill=(225, 225, 230), font=font)
-                y += row_height
+                draw.text((padding + 58, text_y), line[:100], fill=(220, 221, 224), font=font)
+                text_y += 24
+            y += row_h
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         buffer.seek(0)
