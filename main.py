@@ -70,6 +70,10 @@ def database():
         guild INTEGER NOT NULL, user INTEGER NOT NULL, reward TEXT NOT NULL,
         last_claim TEXT NOT NULL, PRIMARY KEY(guild,user,reward)
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS invite_baselines(
+        guild INTEGER NOT NULL, user INTEGER NOT NULL, baseline INTEGER NOT NULL DEFAULT 0,
+        updated TEXT NOT NULL, PRIMARY KEY(guild,user)
+    )""")
     c.commit()
     return c
 
@@ -231,9 +235,15 @@ async def auto_verify_falcon_report(message):
     accepted_names = {member.name.lower(), member.display_name.lower()}
     if requester_name not in accepted_names:
         return
-    # Enforce a separate 2-minute cooldown for each reward, rather than a lifetime claim limit.
+    # Compare Falcon's cumulative total with the last successful reward baseline.
     c = database()
     remaining = cooldown_seconds(c, message.guild.id, member.id, t["reward"])
+    baseline_row = c.execute(
+        "SELECT baseline FROM invite_baselines WHERE guild=? AND user=?",
+        (message.guild.id, member.id)
+    ).fetchone()
+    baseline = int(baseline_row["baseline"]) if baseline_row else 0
+    new_invites = max(0, invites - baseline)
     c.close()
     try:
         rewards = get_rewards(message.guild.id, t["category"])
@@ -248,10 +258,11 @@ async def auto_verify_falcon_report(message):
                 f"**{remaining // 60}:{remaining % 60:02d}**."
             )
             return
-        if invites < required:
+        if new_invites < required:
             await message.channel.send(
-                f"❌ **Invite verification failed.** Falcon reported **{invites}** invites; "
-                f"**{required}** are required. This ticket will be deleted in 15 seconds."
+                f"❌ **Invite verification failed.** Falcon's total is **{invites}**; "
+                f"your last reward baseline is **{baseline}**, so you have **{new_invites} new invites**. "
+                f"**{required} new invites** are required. This ticket will be deleted in 15 seconds."
             )
         else:
             c = database()
@@ -289,6 +300,15 @@ async def auto_verify_falcon_report(message):
                 c.close()
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
+            # Save Falcon's cumulative total only after code registration succeeds.
+            c = database()
+            c.execute(
+                "INSERT INTO invite_baselines(guild,user,baseline,updated) VALUES(?,?,?,?) "
+                "ON CONFLICT(guild,user) DO UPDATE SET baseline=excluded.baseline, updated=excluded.updated",
+                (message.guild.id, member.id, invites, datetime.now(timezone.utc).isoformat())
+            )
+            c.commit()
+            c.close()
             dm = discord.Embed(
                 title="🎉 Your reward is approved!",
                 description=(
