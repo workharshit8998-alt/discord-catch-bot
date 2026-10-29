@@ -78,10 +78,18 @@ def cooldown_seconds(c, guild_id, user_id, reward_name):
         "SELECT last_claim FROM reward_cooldowns WHERE guild=? AND user=? AND reward=?",
         (guild_id, user_id, reward_name)
     ).fetchone()
-    if not row:
+    # Honour recent claims created before this cooldown feature was added.
+    last_value = row["last_claim"] if row else None
+    if not last_value:
+        old_claim = c.execute(
+            "SELECT created FROM claims WHERE guild=? AND user=? AND reward=? ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id, reward_name)
+        ).fetchone()
+        last_value = old_claim["created"] if old_claim else None
+    if not last_value:
         return 0
     try:
-        last = datetime.fromisoformat(row["last_claim"])
+        last = datetime.fromisoformat(last_value)
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
         return max(0, 120 - int((datetime.now(timezone.utc) - last).total_seconds()))
@@ -374,15 +382,22 @@ async def capture_legit_evidence(message):
             messages.append((item.author.display_name.encode("latin-1", "replace").decode("latin-1"),
                              stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?"))
         width, padding = 1000, 34
-        font = ImageFont.load_default()
-        row_heights = [max(76, 48 + len(body) * 25) for _, _, body, _, _ in messages]
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
+            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 17)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        except OSError:
+            font = ImageFont.load_default()
+            font_bold = font
+            font_small = font
+        row_heights = [max(82, 54 + len(body) * 27) for _, _, body, _, _ in messages]
         height = max(440, 132 + sum(row_heights) + 80)
         image = Image.new("RGB", (width, min(height, 6000)), (49, 51, 56))
         draw = ImageDraw.Draw(image)
         draw.rectangle((0, 0, width, 66), fill=(35, 36, 40))
-        draw.text((padding, 24), "#  " + message.channel.name, fill=(245, 245, 247), font=font)
+        draw.text((padding, 22), "#  " + message.channel.name, fill=(245, 245, 247), font=font_bold)
         draw.line((padding, 67, width-padding, 67), fill=(25, 26, 29), width=2)
-        draw.text((padding, 86), "October " + message.created_at.strftime("%d, %Y"), fill=(160, 163, 170), font=font)
+        draw.text((padding, 86), message.created_at.strftime("%B %d, %Y"), fill=(160, 163, 170), font=font_small)
         y = 122
         palette = [(88, 101, 242), (235, 69, 158), (87, 242, 135), (242, 184, 75)]
         for idx, (author, stamp, body, is_bot, initial) in enumerate(messages):
@@ -391,11 +406,11 @@ async def capture_legit_evidence(message):
                 break
             avatar_color = palette[idx % len(palette)]
             draw.ellipse((padding, y + 4, padding + 42, y + 46), fill=avatar_color)
-            draw.text((padding + 16, y + 18), initial, fill=(255, 255, 255), font=font)
+            draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
             name_color = (88, 101, 242) if is_bot else (240, 240, 242)
-            draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font)
+            draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font_bold if is_bot else font)
             name_width = draw.textbbox((padding + 58, y + 4), author[:42], font=font)[2]
-            draw.text((min(name_width + 12, width - 150), y + 4), stamp, fill=(163, 166, 173), font=font)
+            draw.text((min(name_width + 12, width - 150), y + 6), stamp, fill=(163, 166, 173), font=font_small)
             text_y = y + 30
             for line in body:
                 if text_y > image.height - 25:
