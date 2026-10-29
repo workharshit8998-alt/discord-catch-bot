@@ -237,19 +237,26 @@ async def auto_verify_falcon_report(message):
                 c.close()
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
-            await message.channel.send(
-                f"✅ **Invite verification passed!** Falcon reported **{invites}/{required}** required invites.\n"
-                f"**Your reward code:** ||{code}||\n"
-                "The same code has also been sent to your DM. This ticket will be deleted in 15 seconds."
+            dm = discord.Embed(
+                title="🎉 Your reward is approved!",
+                description=(
+                    f"**Reward:** {t['reward']}\n"
+                    f"**Your code:** ||{code}||\n\n"
+                    f"[Claim here]({SITE_URL})\n\n"
+                    "Keep this code private. It is unique to you and this reward."
+                ),
+                color=0x57f287
             )
-            dm = discord.Embed(title="🎉 Your reward is approved!",
-                               description=f"**Reward:** {t['reward']}\n**Your code:** ||{code}||\n\n"
-                                           f"[Claim here]({SITE_URL})\\n\\nKeep this code private.",
-                               color=0x57f287)
+            # Post the same reward embed in the ticket and in the member's DM.
+            await message.channel.send(embed=dm)
             try:
                 await member.send(embed=dm)
             except discord.Forbidden:
-                await message.channel.send(f"{member.mention} I couldn't DM you. Your code is ||{code}||")
+                await message.channel.send(f"{member.mention} I couldn't DM you, so your reward embed is available above in this ticket.")
+            await message.channel.send(
+                f"**Did you receive your reward?** Reply with **Legit** to submit your vouch.\n"
+                f"Example: Legit got {t['reward']} from @TriggerPlayz"
+            )
             # Keep successful tickets open so the member can say "Legit"; evidence is captured then.
             return
         await asyncio.sleep(15)
@@ -343,7 +350,7 @@ async def capture_legit_evidence(message):
             target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
         embed = discord.Embed(
             title="✅ Reward Vouch Received",
-            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit",
+            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** Legit got {ticket['reward']} from @TriggerPlayz",
             color=0xf2b84b
         )
         await target.send(embed=embed, file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
