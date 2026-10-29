@@ -14,7 +14,8 @@ DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
-VOUCH_EVIDENCE_CHANNEL_ID = 1499228792089215108
+VOUCH_EVIDENCE_CHANNEL_ID = 1499228792089215108  # image/transcript channel
+VOUCH_MESSAGE_CHANNEL_ID = 1499228791891824824  # vouch embed channel
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -364,8 +365,14 @@ async def capture_legit_evidence(message):
             description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** Legit got {ticket['reward']} from @TriggerPlayz",
             color=0xf2b84b
         )
-        await target.send(embed=embed, file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
-        await message.channel.send("✅ Thanks! Your vouch screenshot has been sent to the vouch channel. This ticket will close in 10 seconds.")
+        # Send the transcript image to the original evidence channel.
+        await target.send(file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
+        # Send the vouch embed separately to the newly specified vouch channel.
+        vouch_target = message.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        if not isinstance(vouch_target, discord.TextChannel):
+            vouch_target = await message.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        await vouch_target.send(embed=embed)
+        await message.channel.send("✅ Thanks! Your conversation image and vouch have been posted to their configured channels. This ticket will close in 10 seconds.")
         await asyncio.sleep(10)
         c = database()
         c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
