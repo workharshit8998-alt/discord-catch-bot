@@ -412,12 +412,21 @@ async def capture_legit_evidence(message):
             content = re.sub(r"<#(\d+)>", "#channel", content)
             content = content.replace("**", "").replace("__", "").replace("~~", "").replace(chr(96), "")
             content = re.sub(r"(?m)^\s*>\s?", "", content)
+            # Never expose a reward code in the public evidence image.
+            content = re.sub(r"(?i)(your code\s*:\s*)\|\|.*?\|\|", r"\1[SPOILER HIDDEN]", content)
+            content = re.sub(r"(?i)(your code\s*:\s*).*", r"\1[SPOILER HIDDEN]", content)
+            # The image is a transcript rendering, not a literal Discord screenshot.
             safe = content.encode("latin-1", "replace").decode("latin-1")
             body = []
             for paragraph in safe.splitlines() or [""]:
                 body.extend(textwrap.wrap(paragraph, width=72) or [""])
+            avatar_bytes = None
+            try:
+                avatar_bytes = await item.author.display_avatar.replace(size=64).read()
+            except Exception:
+                pass
             messages.append((item.author.display_name.encode("latin-1", "replace").decode("latin-1"),
-                             stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?"))
+                             stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?", avatar_bytes))
         width, padding = 1000, 34
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
@@ -427,7 +436,7 @@ async def capture_legit_evidence(message):
             font = ImageFont.load_default()
             font_bold = font
             font_small = font
-        row_heights = [max(82, 54 + len(body) * 27) for _, _, body, _, _ in messages]
+        row_heights = [max(82, 54 + len(body) * 27) for _, _, body, _, _, _ in messages]
         height = max(440, 132 + sum(row_heights) + 80)
         image = Image.new("RGB", (width, min(height, 6000)), (49, 51, 56))
         draw = ImageDraw.Draw(image)
@@ -437,13 +446,24 @@ async def capture_legit_evidence(message):
         draw.text((padding, 86), message.created_at.strftime("%B %d, %Y"), fill=(160, 163, 170), font=font_small)
         y = 122
         palette = [(88, 101, 242), (235, 69, 158), (87, 242, 135), (242, 184, 75)]
-        for idx, (author, stamp, body, is_bot, initial) in enumerate(messages):
+        for idx, (author, stamp, body, is_bot, initial, avatar_bytes) in enumerate(messages):
             row_h = row_heights[idx]
             if y + row_h > image.height - 20:
                 break
             avatar_color = palette[idx % len(palette)]
-            draw.ellipse((padding, y + 4, padding + 42, y + 46), fill=avatar_color)
-            draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
+            avatar_box = (padding, y + 4, padding + 42, y + 46)
+            if avatar_bytes:
+                try:
+                    avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA").resize((42, 42))
+                    mask = Image.new("L", (42, 42), 0)
+                    ImageDraw.Draw(mask).ellipse((0, 0, 41, 41), fill=255)
+                    image.paste(avatar, (padding, y + 4), mask)
+                except Exception:
+                    draw.ellipse(avatar_box, fill=avatar_color)
+                    draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
+            else:
+                draw.ellipse(avatar_box, fill=avatar_color)
+                draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
             name_color = (88, 101, 242) if is_bot else (240, 240, 242)
             draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font_bold if is_bot else font)
             name_width = draw.textbbox((padding + 58, y + 4), author[:42], font=font)[2]
