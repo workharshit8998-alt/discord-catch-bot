@@ -1,9 +1,11 @@
-import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error
+import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error, textwrap
+from io import BytesIO
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
@@ -12,6 +14,7 @@ DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
+VOUCH_EVIDENCE_CHANNEL_ID = 1499228792089215108
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -247,6 +250,8 @@ async def auto_verify_falcon_report(message):
                 await member.send(embed=dm)
             except discord.Forbidden:
                 await message.channel.send(f"{member.mention} I couldn't DM you. Your code is ||{code}||")
+            # Keep successful tickets open so the member can say "Legit"; evidence is captured then.
+            return
         await asyncio.sleep(15)
         c = database()
         c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
@@ -262,6 +267,107 @@ async def auto_verify_falcon_report(message):
             await message.channel.send("⚠️ Automatic verification hit an error. Staff must check this ticket; it will not be deleted.")
         except Exception:
             pass
+
+
+async def capture_legit_evidence(message):
+    """When the ticket owner says Legit after a code was issued, create a transcript image and post it to the evidence channel."""
+    if not message.guild or not isinstance(message.channel, discord.TextChannel):
+        return
+    if message.author.bot or message.content.strip().casefold() not in {"legit", "legit!", "legit."}:
+        return
+    c = database()
+    ticket = c.execute(
+        "SELECT * FROM tickets WHERE channel=? AND guild=? AND status='open'",
+        (message.channel.id, message.guild.id)
+    ).fetchone()
+    if not ticket or int(ticket["user"]) != message.author.id or not ticket["reward"]:
+        c.close()
+        return
+    claim = c.execute(
+        "SELECT * FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
+        (message.guild.id, message.author.id, ticket["reward"])
+    ).fetchone()
+    if not claim:
+        c.close()
+        return
+    # Mark this ticket as processed before awaiting network operations to avoid duplicate evidence posts.
+    c.execute("UPDATE tickets SET status='legit_received' WHERE channel=?", (message.channel.id,))
+    c.commit()
+    c.close()
+    try:
+        history = [m async for m in message.channel.history(limit=15, oldest_first=True)]
+        lines = []
+        for item in history:
+            stamp = item.created_at.strftime("%Y-%m-%d %H:%M UTC")
+            author = str(item.author.display_name)
+            content = item.content or ""
+            for emb in item.embeds[:2]:
+                if emb.title:
+                    content += (" " if content else "") + emb.title
+                if emb.description:
+                    content += (" " if content else "") + emb.description
+            if item.attachments:
+                content += (" " if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
+            content = content.strip() or "[embed / attachment]"
+            # Use a plain transcript image for broad font compatibility; escape non-latin glyphs if the default font cannot draw them.
+            safe = content.encode("latin-1", "replace").decode("latin-1")
+            lines.append((stamp + "  " + author, textwrap.wrap(safe, width=78) or [""]))
+        width = 1000
+        padding = 32
+        row_height = 26
+        total_lines = sum(1 + len(body) for _, body in lines)
+        height = max(320, 150 + total_lines * row_height)
+        image = Image.new("RGB", (width, min(height, 5000)), (16, 17, 20))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        draw.text((padding, 24), "TRIGGER REWARDS  |  CLAIM VOUCH EVIDENCE", fill=(242, 184, 75), font=font)
+        draw.text((padding, 54), "Member: " + message.author.display_name.encode("latin-1", "replace").decode("latin-1"), fill=(245, 245, 245), font=font)
+        draw.text((padding, 78), "Reward: " + str(ticket["reward"]).encode("latin-1", "replace").decode("latin-1"), fill=(245, 245, 245), font=font)
+        draw.text((padding, 102), "Member message: Legit", fill=(100, 230, 145), font=font)
+        y = 145
+        for heading, body in lines:
+            if y > image.height - 30:
+                break
+            draw.text((padding, y), heading.encode("latin-1", "replace").decode("latin-1")[:110], fill=(105, 190, 255), font=font)
+            y += row_height
+            for line in body:
+                if y > image.height - 30:
+                    break
+                draw.text((padding + 16, y), line[:120], fill=(225, 225, 230), font=font)
+                y += row_height
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        target = message.guild.get_channel(VOUCH_EVIDENCE_CHANNEL_ID)
+        if not isinstance(target, discord.TextChannel):
+            target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
+        embed = discord.Embed(
+            title="✅ Reward Vouch Received",
+            description=f"**Member:** {message.author.mention}\\n**Reward:** {ticket['reward']}\\n**Ticket:** #{message.channel.name}\\n**Vouch:** Legit",
+            color=0xf2b84b
+        )
+        await target.send(embed=embed, file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
+        await message.channel.send("✅ Thanks! Your vouch screenshot has been sent to the vouch channel. This ticket will close in 10 seconds.")
+        await asyncio.sleep(10)
+        c = database()
+        c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
+        c.commit()
+        c.close()
+        try:
+            await message.channel.delete(reason="Reward vouch evidence captured")
+        except discord.Forbidden:
+            pass
+    except Exception as ex:
+        print("Could not capture reward vouch evidence:", repr(ex))
+        c = database()
+        c.execute("UPDATE tickets SET status='open' WHERE channel=?", (message.channel.id,))
+        c.commit()
+        c.close()
+        try:
+            await message.channel.send("⚠️ I couldn't send the vouch evidence. Please check the bot's channel permissions.")
+        except Exception:
+            pass
+
 
 class CloseView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -279,6 +385,7 @@ class CloseView(discord.ui.View):
 @bot.event
 async def on_message(message):
     await auto_verify_falcon_report(message)
+    await capture_legit_evidence(message)
     await bot.process_commands(message)
 
 @bot.event
