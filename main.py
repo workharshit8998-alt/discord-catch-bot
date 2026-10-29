@@ -354,9 +354,26 @@ async def capture_legit_evidence(message):
     c.commit()
     c.close()
     try:
-        history = [m async for m in message.channel.history(limit=25, oldest_first=True)]
+        # Evidence image should contain ONLY the reward-issued message and the member's Legit reply.
+        # Never screenshot the whole ticket conversation.
+        history = [m async for m in message.channel.history(limit=60, before=message, oldest_first=False)]
+        reward_message = None
+        for candidate in history:
+            if not candidate.author.bot:
+                continue
+            parts = [candidate.content or ""]
+            for emb in candidate.embeds:
+                parts.extend([emb.title or "", emb.description or ""])
+                parts.extend(f"{field.name} {field.value}" for field in emb.fields)
+            combined = "\n".join(parts).casefold()
+            has_code = "your code" in combined or "reward code" in combined
+            has_reward = ticket["reward"].casefold() in combined
+            if has_code and has_reward:
+                reward_message = candidate
+                break
+        evidence_messages = ([reward_message] if reward_message else []) + [message]
         messages = []
-        for item in history:
+        for item in evidence_messages:
             stamp = item.created_at.strftime("%I:%M %p").lstrip("0")
             content = item.content or ""
             for emb in item.embeds[:2]:
