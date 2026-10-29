@@ -55,6 +55,11 @@ def database():
     CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, reward TEXT, code TEXT UNIQUE, status TEXT DEFAULT 'issued', created TEXT, redeemed TEXT, UNIQUE(guild,user,reward));
     """)
     c.commit()
+    # Migrate older databases without losing existing settings.
+    settings_columns = {row["name"] for row in c.execute("PRAGMA table_info(settings)").fetchall()}
+    if "vouch_template" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN vouch_template TEXT NOT NULL DEFAULT 'Legit got {reward} from @TriggerPlayz'")
+        c.commit()
     # Migrate older databases: users may claim the same reward again after its cooldown.
     schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'").fetchone()
     if schema and "UNIQUE(guild,user,reward)" in (schema["sql"] or "").replace(" ", ""):
@@ -76,6 +81,24 @@ def database():
     )""")
     c.commit()
     return c
+
+DEFAULT_VOUCH_TEMPLATE = "Legit got {reward} from @TriggerPlayz"
+
+def get_vouch_template(guild_id):
+    c = database()
+    row = c.execute("SELECT vouch_template FROM settings WHERE guild=?", (guild_id,)).fetchone()
+    c.close()
+    return (row["vouch_template"] if row and row["vouch_template"] else DEFAULT_VOUCH_TEMPLATE)
+
+def save_vouch_template(guild_id, template):
+    c = database()
+    c.execute(
+        "INSERT INTO settings(guild, vouch_template) VALUES(?, ?) "
+        "ON CONFLICT(guild) DO UPDATE SET vouch_template=excluded.vouch_template",
+        (guild_id, template)
+    )
+    c.commit()
+    c.close()
 
 def cooldown_seconds(c, guild_id, user_id, reward_name):
     row = c.execute(
@@ -485,7 +508,7 @@ async def capture_legit_evidence(message):
             target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
         embed = discord.Embed(
             title="✅ Reward Vouch Received",
-            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** Legit got {ticket['reward']} from @TriggerPlayz",
+            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** {get_vouch_template(message.guild.id).format(reward=ticket['reward'], user=message.author.mention, ticket=message.channel.name)}",
             color=0xf2b84b
         )
         # Send the transcript image to the original evidence channel.
@@ -657,6 +680,42 @@ class ValidCodeModal(discord.ui.Modal, title="Add Valid Reward Code"):
         except Exception as ex:
             await i.response.send_message("Could not save code: "+str(ex)[:180], ephemeral=True)
 
+class VouchTemplateModal(discord.ui.Modal):
+    def __init__(self, current_template):
+        super().__init__(title="Edit Vouch Message")
+        self.template = discord.ui.TextInput(
+            label="Vouch message template",
+            style=discord.TextStyle.paragraph,
+            default=current_template[:500],
+            placeholder="Example: Legit got {reward} from {user}",
+            max_length=500
+        )
+        self.add_item(self.template)
+
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        template = str(self.template).strip()
+        allowed = {"reward", "user", "ticket"}
+        placeholders = re.findall(r"\{([^{}]+)\}", template)
+        if any(name not in allowed for name in placeholders):
+            return await i.response.send_message(
+                "Unsupported placeholder. Use only {reward}, {user}, and {ticket}.",
+                ephemeral=True
+            )
+        if not template:
+            return await i.response.send_message("Vouch message cannot be empty.", ephemeral=True)
+        try:
+            save_vouch_template(i.guild.id, template)
+            await i.response.send_message(
+                "✅ Vouch message saved. Available placeholders: {reward}, {user}, {ticket}.",
+                ephemeral=True,
+                view=AdminPanel()
+            )
+        except Exception as ex:
+            await i.response.send_message("Could not save vouch message: " + str(ex)[:180], ephemeral=True)
+
+
 class AdminPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -692,6 +751,13 @@ class AdminPanel(discord.ui.View):
             await i.response.send_message(embed=e, ephemeral=True, view=AdminPanel())
         except Exception as ex:
             await i.response.send_message("Could not read configuration: " + str(ex)[:180], ephemeral=True)
+    @discord.ui.button(label="Edit Vouch Message", style=discord.ButtonStyle.primary, emoji="📝", row=2)
+    async def edit_vouch_message(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            await i.response.send_modal(VouchTemplateModal(get_vouch_template(i.guild.id)))
+        except Exception as ex:
+            await i.response.send_message("Could not open vouch editor: " + str(ex)[:180], ephemeral=True)
+
     @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=2)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
         e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\n2. Optionally choose a Discord category for new ticket channels.\n3. Run /staff-role to set who can view tickets.\n4. Add categories and rewards here.\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
@@ -703,7 +769,7 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template here; placeholders: {reward}, {user}, {ticket}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
