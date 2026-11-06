@@ -45,6 +45,160 @@ def get_rewards(guild_id, category=None):
     return sb_request("trigger_rewards_config",params=p)
 
 
+
+
+def sb_rpc(function_name, payload):
+    """Call a SECURITY DEFINER RPC using the bot-only Supabase service role."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase service-role configuration is missing.")
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/rpc/{function_name}",
+        data=body, method="POST",
+        headers={"apikey":SUPABASE_SERVICE_ROLE_KEY,
+                 "Authorization":f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                 "Content-Type":"application/json",
+                 "Accept":"application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("Supabase delivery RPC HTTP "+str(e.code)+": "+e.read().decode("utf-8","replace")[:220]) from e
+
+
+async def deliver_real_reward(guild, claim_id, actor_label="admin"):
+    """Atomically reserve stock, DM it, then record the result. Never expose stock in a channel."""
+    reserved = sb_rpc("trg_reserve_reward_delivery", {
+        "p_claim_id": str(claim_id), "p_guild_id": str(guild.id)
+    })
+    if isinstance(reserved, list):
+        reserved = reserved[0] if reserved else None
+    if not isinstance(reserved, dict) or not reserved.get("inventory_id"):
+        raise RuntimeError("No matching stock is available, or this claim is no longer pending.")
+    inventory_id = reserved["inventory_id"]
+    discord_id = int(reserved["discord_user_id"])
+    secret = str(reserved["secret_payload"])
+    reward_name = str(reserved["reward_name"])
+    try:
+        user = await bot.fetch_user(discord_id)
+        embed = discord.Embed(
+            title="🎁 Your Trigger Rewards prize is here!",
+            description=f"**Reward:** {reward_name}\n\n**Your reward code:**\n||{secret}||\n\nKeep this code private. Do not share passwords, account tokens, or 2FA codes.",
+            color=0xf2b84b
+        )
+        embed.set_footer(text="Trigger Rewards • Private delivery")
+        dm = await user.send(embed=embed)
+        sb_rpc("trg_finish_reward_delivery", {
+            "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
+            "p_message_id": str(dm.id), "p_success": True, "p_error": None
+        })
+        return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
+    except Exception as ex:
+        # A rejected DM is a known failure. The RPC releases stock for a safe retry.
+        try:
+            sb_rpc("trg_finish_reward_delivery", {
+                "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
+                "p_message_id": None, "p_success": False,
+                "p_error": type(ex).__name__[:80]
+            })
+        except Exception as record_error:
+            print("Could not record failed reward delivery:", repr(record_error))
+        if isinstance(ex, discord.Forbidden):
+            raise RuntimeError(f"Could not DM <@{discord_id}> (DMs may be closed). Stock was returned to inventory.") from ex
+        raise RuntimeError(f"Delivery failed for <@{discord_id}>: {type(ex).__name__}. Check delivery history before retrying.") from ex
+
+
+def get_pending_real_claims(guild_id):
+    return sb_request("trg_reward_claims", params={
+        "select":"id,discord_user_id,discord_username,reward_name,status,requested_at",
+        "guild_id":"eq."+str(guild_id),
+        "status":"in.(pending,delivery_failed)",
+        "order":"requested_at.asc",
+        "limit":"25"
+    })
+
+
+class AddRewardStockModal(discord.ui.Modal, title="Add Real Reward Stock"):
+    category = discord.ui.TextInput(label="Category key", placeholder="minecraft", max_length=32)
+    reward = discord.ui.TextInput(label="Exact reward name", placeholder="Minecraft Rank", max_length=120)
+    region = discord.ui.TextInput(label="Region (AS / AU)", default="AS", max_length=8)
+    secret = discord.ui.TextInput(label="Actual reward code", style=discord.TextStyle.paragraph, max_length=500)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        category_key = re.sub(r"[^a-z0-9_-]", "", str(self.category).lower().strip())
+        reward_name = str(self.reward).strip()
+        region_value = str(self.region).strip().upper()
+        secret_value = str(self.secret).strip()
+        if not category_key or not reward_name or not secret_value or region_value not in {"AS", "AU"}:
+            return await i.response.send_message("Enter a category, exact reward name, AS/AU region, and a real reward code.", ephemeral=True)
+        try:
+            matches = get_rewards(i.guild.id, category_key)
+            if not any(x["reward_name"] == reward_name for x in matches):
+                return await i.response.send_message("That exact reward is not configured in this category. Add it first, then add stock.", ephemeral=True)
+            sb_request("trg_reward_inventory", "POST", payload={
+                "guild_id":str(i.guild.id),
+                "reward_key":category_key+":"+reward_name,
+                "reward_name":reward_name,
+                "region":region_value,
+                "secret_payload":secret_value,
+                "status":"available"
+            })
+            await i.response.send_message("✅ One real reward code was added to secure inventory. It is hidden from the website and will only be sent by DM to an eligible claimant.", ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not add stock: "+str(ex)[:180], ephemeral=True)
+
+
+class PendingClaimsSelect(discord.ui.Select):
+    def __init__(self, claims):
+        self.claims = claims
+        options = []
+        for row in claims:
+            username = (row.get("discord_username") or "Discord member")[:45]
+            label = f"{username} · {row.get('reward_name','Reward')}"[:100]
+            status = row.get("status", "pending")
+            options.append(discord.SelectOption(
+                label=label,
+                value=str(row["id"]),
+                description=("Retry failed delivery" if status == "delivery_failed" else "Pending reward delivery")[:100]
+            ))
+        super().__init__(placeholder="Select pending claimants (multiple allowed)",
+                         min_values=1, max_values=len(options), options=options)
+    async def callback(self, i: discord.Interaction):
+        self.view.selected_claim_ids = list(self.values)
+        await i.response.send_message(f"Selected **{len(self.values)}** pending claim(s). Press Deliver Selected to send their matching rewards by DM.", ephemeral=True)
+
+
+class DeliveryQueueView(discord.ui.View):
+    def __init__(self, claims):
+        super().__init__(timeout=300)
+        self.selected_claim_ids = []
+        self.claims = claims
+        if claims:
+            self.add_item(PendingClaimsSelect(claims))
+    async def interaction_check(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+            return False
+        return True
+    @discord.ui.button(label="Deliver Selected", style=discord.ButtonStyle.success, emoji="📨", row=1)
+    async def deliver_selected(self, i: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_claim_ids:
+            return await i.response.send_message("Select at least one pending claimant first.", ephemeral=True)
+        await i.response.defer(ephemeral=True, thinking=True)
+        results = []
+        for claim_id in self.selected_claim_ids[:25]:
+            try:
+                results.append(await deliver_real_reward(i.guild, claim_id, str(i.user.id)))
+            except Exception as ex:
+                results.append("⚠️ "+str(ex)[:180])
+        summary = "\n".join(results)
+        await i.followup.send(summary[:1900] or "No deliveries were processed.", ephemeral=True)
+
+
+
 def database():
     c = sqlite3.connect(DB_FILE)
     c.row_factory = sqlite3.Row
@@ -57,6 +211,9 @@ def database():
     c.commit()
     # Migrate older databases without losing existing settings.
     settings_columns = {row["name"] for row in c.execute("PRAGMA table_info(settings)").fetchall()}
+    if "auto_delivery" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN auto_delivery INTEGER NOT NULL DEFAULT 0")
+        c.commit()
     if "vouch_template" not in settings_columns:
         c.execute("ALTER TABLE settings ADD COLUMN vouch_template TEXT NOT NULL DEFAULT 'Legit got {reward} from @TriggerPlayz'")
         c.commit()
@@ -323,6 +480,32 @@ async def auto_verify_falcon_report(message):
                 c.close()
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
+            # Create the shared, server-only pending claim. This is the only source shown in the DM delivery queue.
+            try:
+                pending = sb_request("trg_reward_claims", "POST", payload={
+                    "guild_id":str(message.guild.id),
+                    "discord_user_id":str(member.id),
+                    "discord_username":member.display_name[:100],
+                    "reward_key":t["category"]+":"+t["reward"],
+                    "reward_name":t["reward"],
+                    "status":"pending"
+                })
+                if not pending:
+                    raise RuntimeError("Supabase did not return the pending claim.")
+            except Exception as ex:
+                # Do not leave a website verification code active if the real-delivery claim failed to persist.
+                try:
+                    sb_request("trigger_reward_valid_codes", "PATCH", params={
+                        "guild_id":"eq."+str(message.guild.id), "code_value":"eq."+code
+                    }, payload={"active":False})
+                except Exception:
+                    pass
+                c = database()
+                c.execute("DELETE FROM claims WHERE guild=? AND user=? AND reward=? AND code=?", (message.guild.id, member.id, t["reward"], code))
+                c.commit(); c.close()
+                await message.channel.send("⚠️ Your invite check passed, but the shared delivery claim could not be saved. No reward code was issued. Staff must check Supabase.")
+                return
+            claim_id = pending[0]["id"] if isinstance(pending, list) else pending.get("id")
             # Consume only the invite requirement for this reward, not the entire cumulative total.
             # This preserves any surplus invites for the member's next claim.
             c = database()
@@ -344,12 +527,20 @@ async def auto_verify_falcon_report(message):
                 ),
                 color=0x57f287
             )
-            # Post the same reward embed in the ticket and in the member's DM.
+            # The 12-character website code remains the legacy verification/timer code.
+            # Actual reward stock is sent separately only through the secure delivery workflow.
             await message.channel.send(embed=dm)
             try:
                 await member.send(embed=dm)
             except discord.Forbidden:
-                await message.channel.send(f"{member.mention} I couldn't DM you, so your reward embed is available above in this ticket.")
+                await message.channel.send(f"{member.mention} I couldn't DM the website verification code. Please enable DMs and ask staff for help.")
+            # Optional automatic real-reward delivery. Disabled by default; admins enable it explicitly.
+            try:
+                if cfg(message.guild.id).get("auto_delivery") and claim_id:
+                    result = await deliver_real_reward(message.guild, claim_id, "auto")
+                    await message.channel.send(result)
+            except Exception as delivery_error:
+                await message.channel.send("⚠️ Automatic real-reward delivery did not complete: "+str(delivery_error)[:180]+" Use /admin-panel → Pending DM Deliveries to retry.")
             await message.channel.send(
                 f"**Did you receive your reward?** Reply with **Legit** to submit your vouch.\n"
                 f"Example: Legit got {t['reward']} from @TriggerPlayz"
@@ -765,6 +956,27 @@ class AdminPanel(discord.ui.View):
         except Exception as ex:
             await i.response.send_message("Could not open vouch editor: " + str(ex)[:180], ephemeral=True)
 
+
+    @discord.ui.button(label="Add Real Reward Stock", style=discord.ButtonStyle.success, emoji="📦", row=3)
+    async def add_real_stock(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(AddRewardStockModal())
+
+    @discord.ui.button(label="Pending DM Deliveries", style=discord.ButtonStyle.success, emoji="📨", row=3)
+    async def pending_deliveries(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            claims = get_pending_real_claims(i.guild.id)
+            if not claims:
+                return await i.response.send_message("There are no pending or failed real-reward deliveries right now.", ephemeral=True)
+            embed = discord.Embed(
+                title="📨 Pending Reward Deliveries",
+                description="Only verified claimants awaiting delivery are listed. Select one or more people, then deliver each matching reward. No server-wide DMs.",
+                color=0xf2b84b
+            )
+            embed.set_footer(text=f"{len(claims)} claim(s) shown • maximum 25 per page")
+            await i.response.send_message(embed=embed, view=DeliveryQueueView(claims), ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not load pending deliveries: "+str(ex)[:180], ephemeral=True)
+
     @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=2)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
         e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\n2. Optionally choose a Discord category for new ticket channels.\n3. Run /staff-role to set who can view tickets.\n4. Add categories and rewards here.\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
@@ -779,6 +991,20 @@ async def admin_panel(i: discord.Interaction):
     e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template here; placeholders: {reward}, {user}, {ticket}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
+
+@bot.tree.command(name="reward-auto-delivery", description="Enable or disable automatic real reward DMs after invite verification")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def reward_auto_delivery(i: discord.Interaction, enabled: bool):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+    c = database()
+    c.execute("INSERT INTO settings(guild,auto_delivery) VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET auto_delivery=excluded.auto_delivery",
+              (i.guild.id, 1 if enabled else 0))
+    c.commit(); c.close()
+    state = "enabled" if enabled else "disabled"
+    await i.response.send_message(f"Automatic real-reward DM delivery is now **{state}**. It only runs for verified ticket claims with matching available stock.", ephemeral=True)
+
 
 @bot.tree.command(name="ticket-setup",description="Post the Trigger Rewards ticket panel")
 @app_commands.guild_only()
