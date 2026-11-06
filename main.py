@@ -115,6 +115,17 @@ async def deliver_real_reward(guild, claim_id, actor_label="admin"):
     except Exception as ex:
         print("DM succeeded but delivery finalization failed; inventory remains locked:", repr(ex))
         raise RuntimeError("Discord accepted the DM, but Supabase could not confirm it. Do not retry this claim until an admin checks delivery state.") from ex
+    ticket_channel_id = reserved.get("source_ticket_channel_id")
+    if ticket_channel_id:
+        ticket_channel = guild.get_channel(int(ticket_channel_id))
+        if isinstance(ticket_channel, discord.TextChannel):
+            try:
+                await ticket_channel.send(
+                    f"✅ The actual **{reward_name}** code was sent privately to <@{discord_id}>. "
+                    "If you received it, reply **Legit** here to submit your vouch."
+                )
+            except Exception as ticket_error:
+                print("Could not post delivery confirmation in ticket:", repr(ticket_error))
     return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
 
 
@@ -544,12 +555,12 @@ async def auto_verify_falcon_report(message):
             c.commit()
             c.close()
             dm = discord.Embed(
-                title="🎉 Your reward is approved!",
+                title="🎟️ Your website verification code is ready!",
                 description=(
                     f"**Reward:** {t['reward']}\n"
-                    f"**Your code:** ||{code}||\n\n"
+                    f"**Website verification code (not the actual prize):** ||{code}||\n\n"
                     f"[Claim here]({SITE_URL})\n\n"
-                    "Keep this code private. It is unique to you and this reward."
+                    "Keep this verification code private. Your actual reward code is delivered separately by the bot after staff delivery."
                 ),
                 color=0x57f287
             )
@@ -568,8 +579,8 @@ async def auto_verify_falcon_report(message):
             except Exception as delivery_error:
                 await message.channel.send("⚠️ Automatic real-reward delivery did not complete: "+str(delivery_error)[:180]+" Use /admin-panel → Pending DM Deliveries to retry.")
             await message.channel.send(
-                f"**Did you receive your reward?** Reply with **Legit** to submit your vouch.\n"
-                f"Example: Legit got {t['reward']} from @TriggerPlayz"
+                "✅ Invite requirement verified. Your real reward is now pending delivery. "
+                "The bot will ask for your vouch only after the actual reward code has been sent by DM."
             )
             # Keep successful tickets open so the member can say "Legit"; evidence is captured then.
             return
@@ -610,6 +621,21 @@ async def capture_legit_evidence(message):
     ).fetchone()
     if not claim:
         c.close()
+        return
+    c.close()
+    # A vouch is accepted only after the real stock item was confirmed delivered by Discord.
+    try:
+        delivered_claim = sb_request("trg_reward_claims", params={
+            "select":"id",
+            "source_ticket_channel_id":"eq."+str(message.channel.id),
+            "status":"eq.delivered",
+            "limit":"1"
+        })
+        if not delivered_claim:
+            await message.channel.send("⏳ Your actual reward has not been delivered yet. Please wait for the private DM, then reply Legit.")
+            return
+    except Exception as ex:
+        await message.channel.send("⚠️ I couldn't verify delivery status, so your vouch was not recorded. Please ask staff to check.")
         return
     # Mark this ticket as processed before awaiting network operations to avoid duplicate evidence posts.
     c.execute("UPDATE tickets SET status='legit_received' WHERE channel=?", (message.channel.id,))
