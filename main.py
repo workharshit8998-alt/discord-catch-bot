@@ -297,7 +297,8 @@ def cooldown_seconds(c, guild_id, user_id, reward_name):
         old_claim = c.execute(
             "SELECT created FROM claims WHERE guild=? AND user=? AND reward=? ORDER BY id DESC LIMIT 1",
             (guild_id, user_id, reward_name)
-        ).fetchone()        last_value = old_claim["created"] if old_claim else None
+        ).fetchone()
+        last_value = old_claim["created"] if old_claim else None
     if not last_value:
         return 0
     try:
@@ -917,7 +918,8 @@ class RewardEditModal(discord.ui.Modal, title="Edit Reward & Requirements"):
             if not found: return await i.response.send_message("Existing reward not found. Use Add Reward to create it.", ephemeral=True, view=AdminPanel())
             sb_request("trigger_rewards_config", "PATCH", params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}","reward_name":f"eq.{old}"}, payload={"reward_name":name,"invite_requirement":count,"reward_text":str(self.details).strip(),"active":True})
             await i.response.send_message(f"✅ Updated **{name}** · {count} required invites. Reward text saved.", ephemeral=True, view=AdminPanel())
-        except Exception as ex:            await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
 
 
 class ValidCodeModal(discord.ui.Modal, title="Add Valid Reward Code"):
@@ -1314,7 +1316,8 @@ async def category_remove(i:discord.Interaction,key:app_commands.Range[str,2,32]
     except Exception as ex:
         await i.response.send_message("Could not remove category: "+str(ex)[:220],ephemeral=True)
 
-@bot.tree.command(name="reward-add",description="Add a website reward with its exact name and invite requirement")@app_commands.guild_only()
+@bot.tree.command(name="reward-add",description="Add a website reward with its exact name and invite requirement")
+@app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 async def reward_add(i:discord.Interaction,category_key:app_commands.Range[str,2,32],name:app_commands.Range[str,2,80],invites:app_commands.Range[int,0,1000]):
     if not i.guild or not i.user.guild_permissions.administrator:
