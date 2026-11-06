@@ -663,7 +663,9 @@ async def capture_legit_evidence(message):
                 f"**Member:** {message.author.mention}\n"
                 f"**Reward:** {discord.utils.escape_markdown(ticket['reward'])}\n"
                 f"**Ticket:** #{discord.utils.escape_markdown(message.channel.name)}\n"
-                f"**Vouch:** {rendered[:2500]}"
+                f"**Vouch:** Legit\\n\\n"
+                f"**Vouch message:** {rendered[:1800]}\\n\\n"
+                "Must Verify here to get reward https://discord.com/channels/1499228791220863110/1499322272861913169"
             ),
             color=0xf2b84b
         )
