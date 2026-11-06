@@ -297,8 +297,7 @@ def cooldown_seconds(c, guild_id, user_id, reward_name):
         old_claim = c.execute(
             "SELECT created FROM claims WHERE guild=? AND user=? AND reward=? ORDER BY id DESC LIMIT 1",
             (guild_id, user_id, reward_name)
-        ).fetchone()
-        last_value = old_claim["created"] if old_claim else None
+        ).fetchone()        last_value = old_claim["created"] if old_claim else None
     if not last_value:
         return 0
     try:
@@ -597,8 +596,7 @@ async def auto_verify_falcon_report(message):
         print("Automatic invite verification failed:", repr(ex))
         try:
             await message.channel.send("⚠️ Automatic verification hit an error. Staff must check this ticket; it will not be deleted.")
-        except Exception:
-            pass
+        except Exception:            pass
 
 
 async def capture_legit_evidence(message):
@@ -802,6 +800,28 @@ async def on_message(message):
     await capture_legit_evidence(message)
     await bot.process_commands(message)
 
+@bot.command(name="sync")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def sync_commands(ctx):
+    guild = discord.Object(id=ctx.guild.id)
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        await ctx.reply(f"✅ Synced **{len(synced)}** slash command(s) to **{ctx.guild.name}**.", mention_author=False)
+    except Exception as ex:
+        await ctx.reply(f"❌ Command sync failed: {type(ex).__name__}: {str(ex)[:180]}", mention_author=False)
+
+@sync_commands.error
+async def sync_commands_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("🔒 Only server administrators can use !sync.", mention_author=False)
+    elif isinstance(error, commands.NoPrivateMessage):
+        return
+    else:
+        await ctx.reply("❌ I couldn't run !sync. Check the bot logs for details.", mention_author=False)
+
+
 @bot.event
 async def on_ready():
     bot.add_view(Panel()); bot.add_view(CloseView())
@@ -897,8 +917,7 @@ class RewardEditModal(discord.ui.Modal, title="Edit Reward & Requirements"):
             if not found: return await i.response.send_message("Existing reward not found. Use Add Reward to create it.", ephemeral=True, view=AdminPanel())
             sb_request("trigger_rewards_config", "PATCH", params={"guild_id":f"eq.{i.guild.id}","category":f"eq.{key}","reward_name":f"eq.{old}"}, payload={"reward_name":name,"invite_requirement":count,"reward_text":str(self.details).strip(),"active":True})
             await i.response.send_message(f"✅ Updated **{name}** · {count} required invites. Reward text saved.", ephemeral=True, view=AdminPanel())
-        except Exception as ex:
-            await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
+        except Exception as ex:            await i.response.send_message("Could not edit reward: " + str(ex)[:180], ephemeral=True)
 
 
 class ValidCodeModal(discord.ui.Modal, title="Add Valid Reward Code"):
@@ -1197,8 +1216,7 @@ async def category_remove(i:discord.Interaction,key:app_commands.Range[str,2,32]
     except Exception as ex:
         await i.response.send_message("Could not remove category: "+str(ex)[:220],ephemeral=True)
 
-@bot.tree.command(name="reward-add",description="Add a website reward with its exact name and invite requirement")
-@app_commands.guild_only()
+@bot.tree.command(name="reward-add",description="Add a website reward with its exact name and invite requirement")@app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 async def reward_add(i:discord.Interaction,category_key:app_commands.Range[str,2,32],name:app_commands.Range[str,2,80],invites:app_commands.Range[int,0,1000]):
     if not i.guild or not i.user.guild_permissions.administrator:
