@@ -71,7 +71,8 @@ def sb_rpc(function_name, payload):
 async def deliver_real_reward(guild, claim_id, actor_label="admin"):
     """Atomically reserve stock, DM it, then record the result. Never expose stock in a channel."""
     reserved = sb_rpc("trg_reserve_reward_delivery", {
-        "p_claim_id": str(claim_id), "p_guild_id": str(guild.id)
+        "p_claim_id": str(claim_id), "p_guild_id": str(guild.id),
+        "p_actor_discord_id": str(actor_label)
     })
     if isinstance(reserved, list):
         reserved = reserved[0] if reserved else None
@@ -124,6 +125,16 @@ def get_pending_real_claims(guild_id):
         "status":"in.(pending,delivery_failed)",
         "order":"requested_at.asc",
         "limit":"25"
+    })
+
+
+
+def get_real_delivery_history(guild_id):
+    return sb_request("trg_reward_deliveries", params={
+        "select":"id,status,discord_user_id,discord_message_id,initiated_by_discord_id,attempts,created_at,sent_at,claim:trg_reward_claims(reward_name,discord_username)",
+        "claim.guild_id":"eq."+str(guild_id),
+        "order":"created_at.desc",
+        "limit":"15"
     })
 
 
@@ -991,6 +1002,26 @@ class AdminPanel(discord.ui.View):
             await i.response.send_message(embed=embed, view=DeliveryQueueView(claims), ephemeral=True)
         except Exception as ex:
             await i.response.send_message("Could not load pending deliveries: "+str(ex)[:180], ephemeral=True)
+
+
+    @discord.ui.button(label="Delivery History", style=discord.ButtonStyle.secondary, emoji="📜", row=4)
+    async def delivery_history(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            rows = get_real_delivery_history(i.guild.id)
+            if not rows:
+                return await i.response.send_message("No real-reward delivery attempts have been recorded yet.", ephemeral=True)
+            lines = []
+            for row in rows[:15]:
+                claim = row.get("claim") or {}
+                reward = claim.get("reward_name", "Reward")
+                username = claim.get("discord_username") or row.get("discord_user_id")
+                sent = row.get("sent_at") or row.get("created_at", "")
+                lines.append(f"**{reward}** → {username} · {row.get('status','unknown')} · attempts: {row.get('attempts',0)} · {str(sent)[:19]}")
+            embed = discord.Embed(title="📜 Real Reward Delivery History", description="\n".join(lines)[:3900], color=0xf2b84b)
+            embed.set_footer(text="Latest 15 attempts • No reward codes are shown here")
+            await i.response.send_message(embed=embed, ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not load delivery history: "+str(ex)[:180], ephemeral=True)
 
     @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=2)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
