@@ -117,10 +117,11 @@ async def deliver_real_reward(guild, claim_id, actor_label="admin"):
         ticket_channel = guild.get_channel(int(ticket_channel_id))
         if isinstance(ticket_channel, discord.TextChannel):
             try:
-                await ticket_channel.send(
-                    f"✅ The actual **{reward_name}** code was sent privately to <@{discord_id}>. "
-                    "If you received it, reply **Legit** here to submit your vouch."
+                rendered_message = render_ticket_message(
+                    guild.id, "delivery_confirmation_message", DEFAULT_DELIVERY_CONFIRMATION_MESSAGE,
+                    reward=discord.utils.escape_markdown(reward_name), user=f"<@{discord_id}>"
                 )
+                await ticket_channel.send(rendered_message)
             except Exception as ticket_error:
                 print("Could not post delivery confirmation in ticket:", repr(ticket_error))
     return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
@@ -229,7 +230,7 @@ def database():
     c = sqlite3.connect(DB_FILE)
     c.row_factory = sqlite3.Row
     c.executescript("""
-    CREATE TABLE IF NOT EXISTS settings(guild INTEGER PRIMARY KEY, staff_role INTEGER DEFAULT 0, ticket_category INTEGER DEFAULT 0, vouch_channel INTEGER DEFAULT 0, invite_default INTEGER DEFAULT 3);
+    CREATE TABLE IF NOT EXISTS settings(guild INTEGER PRIMARY KEY, staff_role INTEGER DEFAULT 0, ticket_category INTEGER DEFAULT 0, vouch_channel INTEGER DEFAULT 0, invite_default INTEGER DEFAULT 3, invite_verified_message TEXT, delivery_confirmation_message TEXT);
     CREATE TABLE IF NOT EXISTS rewards(id INTEGER PRIMARY KEY, guild INTEGER, category TEXT, name TEXT, invites INTEGER, active INTEGER DEFAULT 1, UNIQUE(guild,category,name));
     CREATE TABLE IF NOT EXISTS tickets(channel INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, category TEXT, reward TEXT, status TEXT DEFAULT 'open', created TEXT);
     CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, reward TEXT, code TEXT UNIQUE, status TEXT DEFAULT 'issued', created TEXT, redeemed TEXT, UNIQUE(guild,user,reward));
@@ -243,6 +244,18 @@ def database():
     if "vouch_template" not in settings_columns:
         c.execute("ALTER TABLE settings ADD COLUMN vouch_template TEXT NOT NULL DEFAULT 'Legit got {reward} from @TriggerPlayz'")
         c.commit()
+    if "invite_verified_message" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN invite_verified_message TEXT")
+        c.commit()
+    if "delivery_confirmation_message" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN delivery_confirmation_message TEXT")
+        c.commit()
+    c.execute("""CREATE TABLE IF NOT EXISTS vouches(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild INTEGER NOT NULL, user INTEGER NOT NULL,
+        reward TEXT NOT NULL, ticket_channel INTEGER NOT NULL, confirmed_at TEXT NOT NULL,
+        UNIQUE(guild, ticket_channel)
+    )""")
+    c.commit()
     # Migrate older databases: users may claim the same reward again after its cooldown.
     schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'").fetchone()
     if schema and "UNIQUE(guild,user,reward)" in (schema["sql"] or "").replace(" ", ""):
@@ -266,6 +279,12 @@ def database():
     return c
 
 DEFAULT_VOUCH_TEMPLATE = "Legit got {reward} from @TriggerPlayz"
+DEFAULT_INVITE_VERIFIED_MESSAGE = ("✅ Invite requirement verified. Your reward is now pending delivery. "
+    "Once you receive the actual reward code by DM, say **Legit** to add your name to our vouch database. "
+    "This ticket will be deleted automatically after your confirmation.")
+DEFAULT_DELIVERY_CONFIRMATION_MESSAGE = ("✅ The actual **{reward}** code was sent privately to {user}. "
+    "If you received it, reply **Legit** to add your name to our vouch database. "
+    "This ticket will be deleted automatically after your confirmation.")
 
 def get_vouch_template(guild_id):
     c = database()
@@ -282,6 +301,35 @@ def save_vouch_template(guild_id, template):
     )
     c.commit()
     c.close()
+
+
+def get_ticket_message(guild_id, column, default):
+    if column not in {"invite_verified_message", "delivery_confirmation_message"}:
+        raise ValueError("Unsupported message setting.")
+    c = database()
+    row = c.execute(f"SELECT {column} FROM settings WHERE guild=?", (guild_id,)).fetchone()
+    c.close()
+    return row[column] if row and row[column] else default
+
+
+def save_ticket_messages(guild_id, invite_message, delivery_message):
+    c = database()
+    c.execute(
+        "INSERT INTO settings(guild, invite_verified_message, delivery_confirmation_message) VALUES(?,?,?) "
+        "ON CONFLICT(guild) DO UPDATE SET invite_verified_message=excluded.invite_verified_message, "
+        "delivery_confirmation_message=excluded.delivery_confirmation_message",
+        (guild_id, invite_message, delivery_message)
+    )
+    c.commit()
+    c.close()
+
+
+def render_ticket_message(guild_id, column, default, **values):
+    template = get_ticket_message(guild_id, column, default)
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError, IndexError):
+        return default.format(**values)
 
 def cooldown_seconds(c, guild_id, user_id, reward_name):
     row = c.execute(
@@ -575,10 +623,11 @@ async def auto_verify_falcon_report(message):
                     await message.channel.send(result)
             except Exception as delivery_error:
                 await message.channel.send("⚠️ Automatic real-reward delivery did not complete: "+str(delivery_error)[:180]+" Use /admin-panel → Pending DM Deliveries to retry.")
-            await message.channel.send(
-                "✅ Invite requirement verified. Your real reward is now pending delivery. "
-                "The bot will ask for your vouch only after the actual reward code has been sent by DM."
+            invite_message = render_ticket_message(
+                message.guild.id, "invite_verified_message", DEFAULT_INVITE_VERIFIED_MESSAGE,
+                reward=discord.utils.escape_markdown(t["reward"]), user=member.mention
             )
+            await message.channel.send(invite_message)
             # Keep successful tickets open so the member can say "Legit"; evidence is captured then.
             return
         await asyncio.sleep(15)
@@ -671,6 +720,13 @@ async def capture_legit_evidence(message):
         )
         embed.set_footer(text="Trigger Rewards • Verified delivery")
         await vouch_target.send(embed=embed)
+        c = database()
+        c.execute(
+            "INSERT OR IGNORE INTO vouches(guild,user,reward,ticket_channel,confirmed_at) VALUES(?,?,?,?,?)",
+            (message.guild.id, message.author.id, ticket["reward"], message.channel.id, datetime.now(timezone.utc).isoformat())
+        )
+        c.commit()
+        c.close()
 
         await message.channel.send(
             f"✅ Thanks! Your vouch has been posted in {vouch_target.mention}. This ticket will close in 10 seconds."
@@ -710,6 +766,53 @@ class CloseView(discord.ui.View):
             if m: await i.channel.set_permissions(m,view_channel=False,send_messages=False)
         c=database(); c.execute("UPDATE tickets SET status='closed' WHERE channel=?",(i.channel_id,)); c.commit(); c.close()
         await i.response.send_message("🔒 Ticket closed.")
+
+class DeleteAllTicketsView(discord.ui.View):
+    def __init__(self, requester_id):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+
+    async def interaction_check(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+            return False
+        if i.user.id != self.requester_id:
+            await i.response.send_message("Only the administrator who started this action can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm delete all tickets", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm_delete(self, i: discord.Interaction, button: discord.ui.Button):
+        await i.response.edit_message(content="🗑️ Deleting tracked reward ticket channels…", view=None)
+        c = database()
+        rows = c.execute("SELECT channel FROM tickets WHERE guild=?", (i.guild.id,)).fetchall()
+        channel_ids = [int(row["channel"]) for row in rows]
+        deleted = missing = failed = 0
+        for channel_id in channel_ids:
+            channel = i.guild.get_channel(channel_id)
+            if channel is None:
+                missing += 1
+                continue
+            try:
+                await channel.delete(reason=f"Bulk ticket cleanup requested by {i.user} ({i.user.id})")
+                deleted += 1
+            except discord.NotFound:
+                missing += 1
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+        c.execute("UPDATE tickets SET status='deleted' WHERE guild=?", (i.guild.id,))
+        c.commit()
+        c.close()
+        await i.followup.send(
+            f"✅ Ticket cleanup finished. Deleted: **{deleted}** · Already missing: **{missing}** · Failed: **{failed}**. "
+            "Only channels recorded as Trigger Rewards tickets were targeted; other server channels were untouched.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel_delete(self, i: discord.Interaction, button: discord.ui.Button):
+        await i.response.edit_message(content="Cancelled. No ticket channels were deleted.", view=None)
+
 
 @bot.event
 async def on_message(message):
@@ -903,6 +1006,50 @@ class VouchTemplateModal(discord.ui.Modal):
             await i.response.send_message("Could not save vouch message: " + str(ex)[:180], ephemeral=True)
 
 
+class TicketMessagesModal(discord.ui.Modal, title="Edit Ticket Messages"):
+    def __init__(self, invite_message, delivery_message):
+        super().__init__(title="Edit Ticket Messages")
+        self.invite_message = discord.ui.TextInput(
+            label="After invite requirement verified",
+            style=discord.TextStyle.paragraph,
+            default=invite_message[:500],
+            max_length=500
+        )
+        self.delivery_message = discord.ui.TextInput(
+            label="After actual reward DM sent",
+            style=discord.TextStyle.paragraph,
+            default=delivery_message[:500],
+            max_length=500
+        )
+        self.add_item(self.invite_message)
+        self.add_item(self.delivery_message)
+
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        invite_text = str(self.invite_message).strip()
+        delivery_text = str(self.delivery_message).strip()
+        if not invite_text or not delivery_text:
+            return await i.response.send_message("Both messages must contain text.", ephemeral=True)
+        allowed = {"reward", "user"}
+        for template in (invite_text, delivery_text):
+            placeholders = re.findall(r"\{([^{}]+)\}", template)
+            if any(name not in allowed for name in placeholders):
+                return await i.response.send_message("Unsupported placeholder. Use only {reward} and {user}.", ephemeral=True)
+            try:
+                template.format(reward="Reward", user="@member")
+            except (KeyError, ValueError, IndexError):
+                return await i.response.send_message("Invalid message formatting. Check your braces and placeholders.", ephemeral=True)
+        try:
+            save_ticket_messages(i.guild.id, invite_text, delivery_text)
+            await i.response.send_message(
+                "✅ Ticket messages saved. New tickets will use your updated wording. Placeholders: {reward}, {user}.",
+                ephemeral=True, view=AdminPanel()
+            )
+        except Exception as ex:
+            await i.response.send_message("Could not save ticket messages: " + str(ex)[:180], ephemeral=True)
+
+
 class AdminPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -944,6 +1091,16 @@ class AdminPanel(discord.ui.View):
             await i.response.send_modal(VouchTemplateModal(get_vouch_template(i.guild.id)))
         except Exception as ex:
             await i.response.send_message("Could not open vouch editor: " + str(ex)[:180], ephemeral=True)
+
+    @discord.ui.button(label="Edit Ticket Messages", style=discord.ButtonStyle.primary, emoji="💬", row=2)
+    async def edit_ticket_messages(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            await i.response.send_modal(TicketMessagesModal(
+                get_ticket_message(i.guild.id, "invite_verified_message", DEFAULT_INVITE_VERIFIED_MESSAGE),
+                get_ticket_message(i.guild.id, "delivery_confirmation_message", DEFAULT_DELIVERY_CONFIRMATION_MESSAGE)
+            ))
+        except Exception as ex:
+            await i.response.send_message("Could not open ticket message editor: " + str(ex)[:180], ephemeral=True)
 
 
     @discord.ui.button(label="Add Real Reward Stock", style=discord.ButtonStyle.success, emoji="📦", row=3)
@@ -997,7 +1154,7 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template here; placeholders: {reward}, {user}, {ticket}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template; placeholders: {reward}, {user}, {ticket}.\nTicket messages — edit invite-verified and actual-delivery messages; placeholders: {reward}, {user}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
@@ -1239,6 +1396,23 @@ async def redeem(i:discord.Interaction,code:str):
         return await i.response.send_message("Website code could not be invalidated, so the local claim was left unchanged. Try again. Details: " + str(ex)[:120],ephemeral=True)
     c.execute("UPDATE claims SET status='redeemed',redeemed=? WHERE id=?",(datetime.now(timezone.utc).isoformat(),row["id"])); c.commit(); c.close()
     await i.response.send_message(f"Code redeemed and invalidated on the website. Reward: **{row['reward']}**.",ephemeral=True)
+
+@bot.tree.command(name="delete-all", description="Delete all Trigger Rewards ticket channels in this server")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def delete_all_tickets(i: discord.Interaction):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+    c = database()
+    count = c.execute("SELECT COUNT(*) AS total FROM tickets WHERE guild=?", (i.guild.id,)).fetchone()["total"]
+    c.close()
+    if not count:
+        return await i.response.send_message("There are no tracked Trigger Rewards ticket channels to delete.", ephemeral=True)
+    await i.response.send_message(
+        f"⚠️ This will permanently delete **{count}** channel(s) recorded as Trigger Rewards tickets. It will not touch other server channels. Confirm?",
+        view=DeleteAllTicketsView(i.user.id), ephemeral=True
+    )
+
 
 @bot.tree.command(name="close-ticket",description="Close your current reward ticket")
 @app_commands.guild_only()
