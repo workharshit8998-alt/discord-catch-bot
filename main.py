@@ -12,7 +12,7 @@ DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
-VOUCH_MESSAGE_CHANNEL_ID = 1499228791891824824  # vouch embed channel
+VOUCH_MESSAGE_CHANNEL_ID = int(os.getenv("VOUCH_MESSAGE_CHANNEL_ID", "1499228791891824824"))  # vouch embed channel
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -676,9 +676,17 @@ async def capture_legit_evidence(message):
     c.close()
 
     try:
-        vouch_target = message.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        # Use the configured vouch channel; allow the host environment to override the default.
+        configured_channel_id = int(cfg(message.guild.id).get("vouch_channel") or VOUCH_MESSAGE_CHANNEL_ID)
+        vouch_target = message.guild.get_channel(configured_channel_id)
         if not isinstance(vouch_target, discord.TextChannel):
-            vouch_target = await message.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+            vouch_target = await message.guild.fetch_channel(configured_channel_id)
+        if not isinstance(vouch_target, discord.TextChannel) or vouch_target.guild.id != message.guild.id:
+            raise RuntimeError(f"Vouch channel {configured_channel_id} is not a text channel in this server.")
+        bot_member = message.guild.me or await message.guild.fetch_member(bot.user.id)
+        perms = vouch_target.permissions_for(bot_member)
+        if not perms.view_channel or not perms.send_messages or not perms.embed_links:
+            raise RuntimeError(f"Bot needs View Channel, Send Messages and Embed Links in vouch channel {configured_channel_id}.")
 
         template = get_vouch_template(message.guild.id)
         rendered = template.format(
@@ -724,14 +732,15 @@ async def capture_legit_evidence(message):
         except discord.Forbidden:
             print("Cannot delete ticket: bot needs Manage Channels permission.")
     except Exception as ex:
-        print("Could not post Legit acknowledgement:", repr(ex))
+        print(f"Could not post Legit acknowledgement to channel {VOUCH_MESSAGE_CHANNEL_ID}:", repr(ex))
         c = database()
         c.execute("UPDATE tickets SET status='open' WHERE channel=?", (message.channel.id,))
         c.commit()
         c.close()
         try:
             await message.channel.send(
-                "⚠️ I couldn't post your vouch. Please check the bot's permissions in the vouch channel."
+                f"⚠️ I couldn't post your vouch: {type(ex).__name__}: {str(ex)[:250]} "
+                "Please check the vouch channel ID and the bot's View Channel, Send Messages and Embed Links permissions."
             )
         except Exception:
             pass
