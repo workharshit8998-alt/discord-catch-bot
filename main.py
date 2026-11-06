@@ -482,12 +482,13 @@ async def auto_verify_falcon_report(message):
                 return
             # Create the shared, server-only pending claim. This is the only source shown in the DM delivery queue.
             try:
-                pending = sb_request("trg_reward_claims", "POST", payload={
+                pending = sb_request("trg_reward_claims", "POST", params={"on_conflict":"source_ticket_channel_id"}, payload={
                     "guild_id":str(message.guild.id),
                     "discord_user_id":str(member.id),
                     "discord_username":member.display_name[:100],
                     "reward_key":t["category"]+":"+t["reward"],
                     "reward_name":t["reward"],
+                    "source_ticket_channel_id":str(message.channel.id),
                     "status":"pending"
                 })
                 if not pending:
