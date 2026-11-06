@@ -679,9 +679,6 @@ async def capture_legit_evidence(message):
             "limit":"1"
         })
         if not delivered_claim:
-            await message.channel.send(
-                "⏳ Your reward delivery hasn't been confirmed yet. Please wait for your private DM, then reply **Legit**."
-            )
             return
     except Exception:
         await message.channel.send(
