@@ -90,13 +90,8 @@ async def deliver_real_reward(guild, claim_id, actor_label="admin"):
         )
         embed.set_footer(text="Trigger Rewards • Private delivery")
         dm = await user.send(embed=embed)
-        sb_rpc("trg_finish_reward_delivery", {
-            "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
-            "p_message_id": str(dm.id), "p_success": True, "p_error": None
-        })
-        return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
     except Exception as ex:
-        # A rejected DM is a known failure. The RPC releases stock for a safe retry.
+        # The DM did not succeed, so releasing the reserved item is safe.
         try:
             sb_rpc("trg_finish_reward_delivery", {
                 "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
@@ -107,7 +102,19 @@ async def deliver_real_reward(guild, claim_id, actor_label="admin"):
             print("Could not record failed reward delivery:", repr(record_error))
         if isinstance(ex, discord.Forbidden):
             raise RuntimeError(f"Could not DM <@{discord_id}> (DMs may be closed). Stock was returned to inventory.") from ex
-        raise RuntimeError(f"Delivery failed for <@{discord_id}>: {type(ex).__name__}. Check delivery history before retrying.") from ex
+        raise RuntimeError(f"DM failed for <@{discord_id}>: {type(ex).__name__}.") from ex
+
+    # Discord accepted the DM. If finalization fails, leave stock locked in sending
+    # and do NOT release/retry it automatically: that avoids delivering the same code twice.
+    try:
+        sb_rpc("trg_finish_reward_delivery", {
+            "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
+            "p_message_id": str(dm.id), "p_success": True, "p_error": None
+        })
+    except Exception as ex:
+        print("DM succeeded but delivery finalization failed; inventory remains locked:", repr(ex))
+        raise RuntimeError("Discord accepted the DM, but Supabase could not confirm it. Do not retry this claim until an admin checks delivery state.") from ex
+    return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
 
 
 def get_pending_real_claims(guild_id):
@@ -482,7 +489,14 @@ async def auto_verify_falcon_report(message):
                 return
             # Create the shared, server-only pending claim. This is the only source shown in the DM delivery queue.
             try:
-                pending = sb_request("trg_reward_claims", "POST", params={"on_conflict":"source_ticket_channel_id"}, payload={
+                already_created = sb_request("trg_reward_claims", params={
+                    "select":"id,status",
+                    "source_ticket_channel_id":"eq."+str(message.channel.id),
+                    "limit":"1"
+                })
+                if already_created:
+                    raise RuntimeError("This ticket already has a real-reward claim; duplicate invite-log event ignored.")
+                pending = sb_request("trg_reward_claims", "POST", payload={
                     "guild_id":str(message.guild.id),
                     "discord_user_id":str(member.id),
                     "discord_username":member.display_name[:100],
