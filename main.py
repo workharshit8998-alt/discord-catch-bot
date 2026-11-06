@@ -1,11 +1,9 @@
-import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error, textwrap
-from io import BytesIO
+import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
@@ -14,7 +12,6 @@ DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
-VOUCH_EVIDENCE_CHANNEL_ID = 1499228792089215108  # image/transcript channel
 VOUCH_MESSAGE_CHANNEL_ID = 1499228791891824824  # vouch embed channel
 intents = discord.Intents.default()
 intents.members = True
@@ -601,11 +598,12 @@ async def auto_verify_falcon_report(message):
 
 
 async def capture_legit_evidence(message):
-    """When the ticket owner says Legit after a code was issued, create a transcript image and post it to the evidence channel."""
+    """Post a text-only vouch after the ticket owner confirms a delivered reward."""
     if not message.guild or not isinstance(message.channel, discord.TextChannel):
         return
     if message.author.bot or message.content.strip().casefold() not in {"legit", "legit!", "legit."}:
         return
+
     c = database()
     ticket = c.execute(
         "SELECT * FROM tickets WHERE channel=? AND guild=? AND status='open'",
@@ -614,170 +612,86 @@ async def capture_legit_evidence(message):
     if not ticket or int(ticket["user"]) != message.author.id or not ticket["reward"]:
         c.close()
         return
-    claim = c.execute(
-        "SELECT * FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
+    local_claim = c.execute(
+        "SELECT id FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
         (message.guild.id, message.author.id, ticket["reward"])
     ).fetchone()
-    if not claim:
-        c.close()
-        return
     c.close()
-    # A vouch is accepted only after the real stock item was confirmed delivered by Discord.
+    if not local_claim:
+        return
+
+    # A public vouch is accepted only after Supabase confirms this user's real delivery.
     try:
         delivered_claim = sb_request("trg_reward_claims", params={
-            "select":"id",
+            "select":"id,reward_name,discord_user_id",
             "source_ticket_channel_id":"eq."+str(message.channel.id),
+            "discord_user_id":"eq."+str(message.author.id),
             "status":"eq.delivered",
             "limit":"1"
         })
         if not delivered_claim:
-            await message.channel.send("⏳ Your actual reward has not been delivered yet. Please wait for the private DM, then reply Legit.")
+            await message.channel.send(
+                "⏳ Your reward delivery hasn't been confirmed yet. Please wait for your private DM, then reply **Legit**."
+            )
             return
-    except Exception as ex:
-        await message.channel.send("⚠️ I couldn't verify delivery status, so your vouch was not recorded. Please ask staff to check.")
+    except Exception:
+        await message.channel.send(
+            "⚠️ I couldn't verify the delivery, so your vouch wasn't posted. Please ask staff to check."
+        )
         return
-    # Mark this ticket as processed before awaiting network operations to avoid duplicate evidence posts.
+
+    # Mark this ticket before network sends to prevent duplicate vouch posts.
+    c = database()
     c.execute("UPDATE tickets SET status='legit_received' WHERE channel=?", (message.channel.id,))
     c.commit()
     c.close()
+
     try:
-        # Evidence image should contain ONLY the reward-issued message and the member's Legit reply.
-        # Never screenshot the whole ticket conversation.
-        history = [m async for m in message.channel.history(limit=60, before=message, oldest_first=False)]
-        reward_message = None
-        for candidate in history:
-            if not candidate.author.bot:
-                continue
-            parts = [candidate.content or ""]
-            for emb in candidate.embeds:
-                parts.extend([emb.title or "", emb.description or ""])
-                parts.extend(f"{field.name} {field.value}" for field in emb.fields)
-            combined = "\n".join(parts).casefold()
-            has_code = "your code" in combined or "reward code" in combined
-            has_reward = ticket["reward"].casefold() in combined
-            if has_code and has_reward:
-                reward_message = candidate
-                break
-        evidence_messages = ([reward_message] if reward_message else []) + [message]
-        messages = []
-        for item in evidence_messages:
-            stamp = item.created_at.strftime("%I:%M %p").lstrip("0")
-            content = item.content or ""
-            for emb in item.embeds[:2]:
-                if emb.title:
-                    content += ("\n" if content else "") + emb.title
-                if emb.description:
-                    content += ("\n" if content else "") + emb.description
-                for field in emb.fields[:5]:
-                    content += ("\n" if content else "") + f"{field.name}: {field.value}"
-            if item.attachments:
-                content += ("\n" if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
-            content = content.strip() or "[embed / attachment]"
-            # Render Markdown as readable chat text instead of raw **bold** and link syntax.
-            content = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", content)
-            content = re.sub(r"<@!?(\d+)>", "@member", content)
-            content = re.sub(r"<#(\d+)>", "#channel", content)
-            content = content.replace("**", "").replace("__", "").replace("~~", "").replace(chr(96), "")
-            content = re.sub(r"(?m)^\s*>\s?", "", content)
-            # Never expose a reward code in the public evidence image.
-            content = re.sub(r"(?i)(your code\s*:\s*)\|\|.*?\|\|", r"\1[SPOILER HIDDEN]", content)
-            content = re.sub(r"(?i)(your code\s*:\s*).*", r"\1[SPOILER HIDDEN]", content)
-            # The image is a transcript rendering, not a literal Discord screenshot.
-            safe = content.encode("latin-1", "replace").decode("latin-1")
-            body = []
-            for paragraph in safe.splitlines() or [""]:
-                body.extend(textwrap.wrap(paragraph, width=72) or [""])
-            avatar_bytes = None
-            try:
-                avatar_bytes = await item.author.display_avatar.replace(size=64).read()
-            except Exception:
-                pass
-            messages.append((item.author.display_name.encode("latin-1", "replace").decode("latin-1"),
-                             stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?", avatar_bytes))
-        width, padding = 1000, 34
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
-            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 17)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-        except OSError:
-            font = ImageFont.load_default()
-            font_bold = font
-            font_small = font
-        row_heights = [max(82, 54 + len(body) * 27) for _, _, body, _, _, _ in messages]
-        height = max(440, 132 + sum(row_heights) + 80)
-        image = Image.new("RGB", (width, min(height, 6000)), (49, 51, 56))
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, width, 66), fill=(35, 36, 40))
-        draw.text((padding, 22), "#  " + message.channel.name, fill=(245, 245, 247), font=font_bold)
-        draw.line((padding, 67, width-padding, 67), fill=(25, 26, 29), width=2)
-        draw.text((padding, 86), message.created_at.strftime("%B %d, %Y"), fill=(160, 163, 170), font=font_small)
-        y = 122
-        palette = [(88, 101, 242), (235, 69, 158), (87, 242, 135), (242, 184, 75)]
-        for idx, (author, stamp, body, is_bot, initial, avatar_bytes) in enumerate(messages):
-            row_h = row_heights[idx]
-            if y + row_h > image.height - 20:
-                break
-            avatar_color = palette[idx % len(palette)]
-            avatar_box = (padding, y + 4, padding + 42, y + 46)
-            if avatar_bytes:
-                try:
-                    avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA").resize((42, 42))
-                    mask = Image.new("L", (42, 42), 0)
-                    ImageDraw.Draw(mask).ellipse((0, 0, 41, 41), fill=255)
-                    image.paste(avatar, (padding, y + 4), mask)
-                except Exception:
-                    draw.ellipse(avatar_box, fill=avatar_color)
-                    draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
-            else:
-                draw.ellipse(avatar_box, fill=avatar_color)
-                draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
-            name_color = (88, 101, 242) if is_bot else (240, 240, 242)
-            draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font_bold if is_bot else font)
-            name_width = draw.textbbox((padding + 58, y + 4), author[:42], font=font)[2]
-            draw.text((min(name_width + 12, width - 150), y + 6), stamp, fill=(163, 166, 173), font=font_small)
-            text_y = y + 30
-            for line in body:
-                if text_y > image.height - 25:
-                    break
-                draw.text((padding + 58, text_y), line[:100], fill=(220, 221, 224), font=font)
-                text_y += 24
-            y += row_h
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
-        target = message.guild.get_channel(VOUCH_EVIDENCE_CHANNEL_ID)
-        if not isinstance(target, discord.TextChannel):
-            target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
-        embed = discord.Embed(
-            title="✅ Reward Vouch Received",
-            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** {get_vouch_template(message.guild.id).format(reward=ticket['reward'], user=message.author.mention, ticket=message.channel.name)}",
-            color=0xf2b84b
-        )
-        # Send the transcript image to the original evidence channel.
-        await target.send(file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
-        # Send the vouch embed separately to the newly specified vouch channel.
         vouch_target = message.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
         if not isinstance(vouch_target, discord.TextChannel):
             vouch_target = await message.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+
+        template = get_vouch_template(message.guild.id)
+        rendered = template.format(
+            reward=discord.utils.escape_markdown(ticket["reward"]),
+            user=message.author.mention,
+            ticket=discord.utils.escape_markdown(message.channel.name)
+        )
+        embed = discord.Embed(
+            title="✅ Reward Vouch Received",
+            description=(
+                f"**Member:** {message.author.mention}\n"
+                f"**Reward:** {discord.utils.escape_markdown(ticket['reward'])}\n"
+                f"**Ticket:** #{discord.utils.escape_markdown(message.channel.name)}\n"
+                f"**Vouch:** {rendered[:2500]}"
+            ),
+            color=0xf2b84b
+        )
+        embed.set_footer(text="Trigger Rewards • Verified delivery")
         await vouch_target.send(embed=embed)
-        await message.channel.send("✅ Thanks! Your conversation image and vouch have been posted to their configured channels. This ticket will close in 10 seconds.")
+
+        await message.channel.send(
+            f"✅ Thanks! Your vouch has been posted in {vouch_target.mention}. This ticket will close in 10 seconds."
+        )
         await asyncio.sleep(10)
         c = database()
         c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
         c.commit()
         c.close()
         try:
-            await message.channel.delete(reason="Reward vouch evidence captured")
+            await message.channel.delete(reason="Verified reward vouch posted")
         except discord.Forbidden:
             pass
     except Exception as ex:
-        print("Could not capture reward vouch evidence:", repr(ex))
+        print("Could not post verified reward vouch:", repr(ex))
         c = database()
         c.execute("UPDATE tickets SET status='open' WHERE channel=?", (message.channel.id,))
         c.commit()
         c.close()
         try:
-            await message.channel.send("⚠️ I couldn't send the vouch evidence. Please check the bot's channel permissions.")
+            await message.channel.send(
+                "⚠️ I couldn't post your vouch. Please check the bot's permissions in the vouch channel."
+            )
         except Exception:
             pass
 
@@ -1084,172 +998,6 @@ async def admin_panel(i: discord.Interaction):
     e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template here; placeholders: {reward}, {user}, {ticket}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
-
-def make_demo_vouch_image(username, provider):
-    """Render a proof-channel sample card that is visibly marked as fictional."""
-    image = Image.new("RGB", (1200, 630), (15, 15, 20))
-    draw = ImageDraw.Draw(image)
-    try:
-        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 58)
-        body_font = ImageFont.truetype("DejaVuSans.ttf", 34)
-        small_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 27)
-    except OSError:
-        title_font = body_font = small_font = ImageFont.load_default()
-    gold = (242, 184, 75)
-    draw.rounded_rectangle((35, 35, 1165, 595), radius=32, outline=gold, width=5)
-    draw.text((85, 85), "TRIGGER REWARDS", font=small_font, fill=gold)
-    draw.text((85, 180), "SAMPLE VOUCH", font=title_font, fill=(255, 255, 255))
-    draw.text((85, 290), "Username: " + str(username)[:34], font=body_font, fill=(235, 235, 235))
-    draw.text((85, 355), "Provider: " + str(provider)[:34], font=body_font, fill=(235, 235, 235))
-    draw.rounded_rectangle((85, 455, 1115, 535), radius=18, fill=(110, 35, 35))
-    draw.text((115, 478), "DEMO ONLY • NOT A REAL CUSTOMER / NOT VERIFIED", font=small_font, fill=(255, 255, 255))
-    output = BytesIO()
-    image.save(output, format="PNG")
-    output.seek(0)
-    return output
-
-
-@bot.tree.command(name="vouch-add", description="Generate clearly labelled sample vouches and proof cards")
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 10]):
-    """Post fictional sample vouches; never represent them as genuine customer feedback."""
-    if not i.guild or not i.user.guild_permissions.administrator:
-        return await i.response.send_message("Administrator only.", ephemeral=True)
-
-    await i.response.defer(ephemeral=True, thinking=True)
-    vouch_channel = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
-    proof_channel = i.guild.get_channel(VOUCH_EVIDENCE_CHANNEL_ID)
-    if not isinstance(vouch_channel, discord.TextChannel):
-        try:
-            vouch_channel = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
-        except Exception:
-            vouch_channel = None
-    if not isinstance(proof_channel, discord.TextChannel):
-        try:
-            proof_channel = await i.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
-        except Exception:
-            proof_channel = None
-    if not isinstance(vouch_channel, discord.TextChannel) or not isinstance(proof_channel, discord.TextChannel):
-        return await i.followup.send(
-            "I couldn't find both configured vouch and proof channels. Check the channel IDs and bot permissions.",
-            ephemeral=True
-        )
-
-    first_names = ["Nova", "Pixel", "Shadow", "Lunar", "Frost", "Blaze", "Echo", "Astra", "Raven", "Cobalt",
-                   "Neon", "Storm", "Cosmic", "Viper", "Misty", "Onyx", "Turbo", "Zen", "Phantom", "Orbit"]
-    second_names = ["Fox", "Wolf", "Byte", "Craft", "Spark", "Knight", "Cloud", "Ninja", "Drift", "Quest",
-                    "Gamer", "Pulse", "Comet", "Rider", "Ghost", "Flare", "Miner", "Wave", "Dash", "Core"]
-    providers = ["Minecraft Rank", "YouTube Premium", "Streaming Reward"]
-    posted = 0
-    failures = []
-
-    try:
-        template = get_vouch_template(i.guild.id)
-    except Exception as ex:
-        return await i.followup.send("Couldn't load the saved vouch template: " + str(ex)[:150], ephemeral=True)
-
-    for index in range(number):
-        username = f"{secrets.choice(first_names)}{secrets.choice(second_names)}{secrets.randbelow(9000) + 1000}"
-        provider = secrets.choice(providers)
-        safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username))
-        safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(provider))
-        try:
-            rendered = template.format(reward=safe_provider, user=safe_username, ticket="DEMO")
-            # Match the real customer-vouch embed layout, while keeping the sample disclosure
-            # prominent so generated usernames cannot be mistaken for actual customers.
-            embed = discord.Embed(
-                title="✅ Reward Vouch Received · SAMPLE",
-                description=(
-                    f"**Member:** {safe_username}\n"
-                    f"**Reward:** {safe_provider}\n"
-                    f"**Ticket:** Sample #{index + 1}\n"
-                    f"**Vouch:** {rendered[:2500]}\n\n"
-                    "**Status:** GENERATED SAMPLE — not a real customer or verified delivery."
-                ),
-                color=0xf2b84b
-            )
-            embed.set_footer(text="Trigger Rewards • Sample only, not verified")
-            await vouch_channel.send(embed=embed)
-
-            card = make_demo_vouch_image(username, provider)
-            await proof_channel.send(
-                content=f"🧪 **DEMO PROOF CARD — NOT REAL CUSTOMER EVIDENCE** · Sample {index + 1}/{number}",
-                file=discord.File(card, filename=f"demo-vouch-{index + 1}.png")
-            )
-            posted += 1
-            await asyncio.sleep(0.8)
-        except Exception as ex:
-            failures.append(f"{index + 1}: {type(ex).__name__}")
-
-    summary = f"Posted **{posted}/{number}** clearly labelled sample vouches in {vouch_channel.mention} and matching DEMO cards in {proof_channel.mention}."
-    if failures:
-        summary += "\nFailed: " + ", ".join(failures[:10])
-    await i.followup.send(summary, ephemeral=True)
-
-
-@bot.tree.command(name="fake-vouch", description="Post a clearly labelled demo vouch using the saved vouch template")
-@app_commands.guild_only()
-@app_commands.default_permissions(administrator=True)
-async def fake_vouch(
-    i: discord.Interaction,
-    username: app_commands.Range[str, 1, 80],
-    user_provider: app_commands.Range[str, 1, 80]
-):
-    """Create a DEMO-only sample; it never creates or verifies a real reward claim."""
-    if not i.guild or not i.user.guild_permissions.administrator:
-        return await i.response.send_message("Administrator only.", ephemeral=True)
-
-    target = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
-    if not isinstance(target, discord.TextChannel):
-        try:
-            target = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
-        except Exception:
-            target = None
-    if not isinstance(target, discord.TextChannel):
-        return await i.response.send_message(
-            "The configured vouch channel could not be found. Check VOUCH_MESSAGE_CHANNEL_ID.",
-            ephemeral=True
-        )
-
-    safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username.strip()))
-    safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(user_provider.strip()))
-    try:
-        template = get_vouch_template(i.guild.id)
-        rendered = template.format(
-            reward=safe_provider,
-            user=safe_username,
-            ticket="DEMO"
-        )
-    except (KeyError, ValueError, IndexError) as ex:
-        return await i.response.send_message(
-            "Your saved vouch template could not be rendered. Check it in /admin-panel → Edit Vouch Message.",
-            ephemeral=True
-        )
-
-    embed = discord.Embed(
-        title="🧪 DEMO VOUCH • NOT VERIFIED",
-        description=rendered,
-        color=0x9b59b6
-    )
-    embed.add_field(name="Username (demo text)", value=safe_username[:1024], inline=True)
-    embed.add_field(name="User provider (demo)", value=safe_provider[:1024], inline=True)
-    embed.add_field(name="Status", value="DEMO / FAKE — not a real customer review or verified delivery", inline=False)
-    embed.set_footer(text="Trigger Rewards • Admin-created demonstration")
-    try:
-        await target.send(embed=embed)
-        await i.response.send_message(
-            f"✅ Demo vouch posted in {target.mention}. It is labelled DEMO and does not count as a verified vouch.",
-            ephemeral=True
-        )
-    except discord.Forbidden:
-        await i.response.send_message(
-            "I cannot post in the vouch channel. Give the bot View Channel, Send Messages and Embed Links permissions.",
-            ephemeral=True
-        )
-    except Exception as ex:
-        await i.response.send_message("Could not post demo vouch: " + str(ex)[:160], ephemeral=True)
-
 
 @bot.tree.command(name="reward-auto-delivery", description="Enable or disable automatic real reward DMs after invite verification")
 @app_commands.guild_only()
