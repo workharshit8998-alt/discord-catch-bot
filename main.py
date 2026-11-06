@@ -647,7 +647,7 @@ async def auto_verify_falcon_report(message):
 
 
 async def capture_legit_evidence(message):
-    """Post a text-only vouch after the ticket owner confirms a delivered reward."""
+    """Record the ticket owner's Legit acknowledgement and delete the ticket after 15 seconds."""
     if not message.guild or not isinstance(message.channel, discord.TextChannel):
         return
     if message.author.bot or message.content.strip().casefold() not in {"legit", "legit!", "legit."}:
@@ -661,94 +661,29 @@ async def capture_legit_evidence(message):
     if not ticket or int(ticket["user"]) != message.author.id or not ticket["reward"]:
         c.close()
         return
-    local_claim = c.execute(
-        "SELECT id FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
-        (message.guild.id, message.author.id, ticket["reward"])
-    ).fetchone()
-    c.close()
-    if not local_claim:
-        return
 
-    # A public vouch is accepted only after Supabase confirms this user's real delivery.
-    try:
-        delivered_claim = sb_request("trg_reward_claims", params={
-            "select":"id,reward_name,discord_user_id",
-            "source_ticket_channel_id":"eq."+str(message.channel.id),
-            "discord_user_id":"eq."+str(message.author.id),
-            "status":"eq.delivered",
-            "limit":"1"
-        })
-        if not delivered_claim:
-            return
-    except Exception:
-        await message.channel.send(
-            "⚠️ I couldn't verify the delivery, so your vouch wasn't posted. Please ask staff to check."
-        )
-        return
-
-    # Mark this ticket before network sends to prevent duplicate vouch posts.
-    c = database()
+    # This is an acknowledgement that the member's name can be added to the
+    # reward follow-up database. It is NOT a claim that the reward was delivered.
     c.execute("UPDATE tickets SET status='legit_received' WHERE channel=?", (message.channel.id,))
+    c.execute(
+        "INSERT OR IGNORE INTO vouches(guild,user,reward,ticket_channel,confirmed_at) VALUES(?,?,?,?,?)",
+        (message.guild.id, message.author.id, ticket["reward"], message.channel.id, datetime.now(timezone.utc).isoformat())
+    )
     c.commit()
     c.close()
 
     try:
-        vouch_target = message.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
-        if not isinstance(vouch_target, discord.TextChannel):
-            vouch_target = await message.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
-
-        template = get_vouch_template(message.guild.id)
-        rendered = template.format(
-            reward=discord.utils.escape_markdown(ticket["reward"]),
-            user=message.author.mention,
-            ticket=discord.utils.escape_markdown(message.channel.name)
-        )
-        embed = discord.Embed(
-            title="✅ Reward Vouch Received",
-            description=(
-                f"**Member:** {message.author.mention}\n"
-                f"**Reward:** {discord.utils.escape_markdown(ticket['reward'])}\n"
-                f"**Ticket:** #{discord.utils.escape_markdown(message.channel.name)}\n"
-                f"**Vouch:** Legit\n\n"
-                f"**Vouch message:** {rendered[:1800]}\n\n"
-                "Must Verify here to get reward https://discord.com/channels/1499228791220863110/1499322272861913169"
-            ),
-            color=0xf2b84b
-        )
-        embed.set_footer(text="Trigger Rewards • Verified delivery")
-        await vouch_target.send(embed=embed)
-        c = database()
-        c.execute(
-            "INSERT OR IGNORE INTO vouches(guild,user,reward,ticket_channel,confirmed_at) VALUES(?,?,?,?,?)",
-            (message.guild.id, message.author.id, ticket["reward"], message.channel.id, datetime.now(timezone.utc).isoformat())
-        )
-        c.commit()
-        c.close()
-
         await message.channel.send(
-            f"✅ Thanks! Your vouch has been posted in {vouch_target.mention}. This ticket will close in 10 seconds."
+            "✅ Thanks! Your name has been added to the reward follow-up database. "
+            "Your reward will be provided shortly. This ticket will be deleted in 15 seconds."
         )
-        await asyncio.sleep(10)
-        c = database()
-        c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
-        c.commit()
-        c.close()
+        await asyncio.sleep(15)
         try:
-            await message.channel.delete(reason="Verified reward vouch posted")
+            await message.channel.delete(reason="Member confirmed Legit; ticket cleanup")
         except discord.Forbidden:
-            pass
+            print("Cannot delete ticket: bot needs Manage Channels permission.")
     except Exception as ex:
-        print("Could not post verified reward vouch:", repr(ex))
-        c = database()
-        c.execute("UPDATE tickets SET status='open' WHERE channel=?", (message.channel.id,))
-        c.commit()
-        c.close()
-        try:
-            await message.channel.send(
-                "⚠️ I couldn't post your vouch. Please check the bot's permissions in the vouch channel."
-            )
-        except Exception:
-            pass
+        print("Could not complete Legit acknowledgement:", repr(ex))
 
 
 class CloseView(discord.ui.View):
