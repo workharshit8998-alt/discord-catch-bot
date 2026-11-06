@@ -1156,15 +1156,20 @@ async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 1
         safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(provider))
         try:
             rendered = template.format(reward=safe_provider, user=safe_username, ticket="DEMO")
+            # Match the real customer-vouch embed layout, while keeping the sample disclosure
+            # prominent so generated usernames cannot be mistaken for actual customers.
             embed = discord.Embed(
-                title="🧪 DEMO VOUCH • GENERATED SAMPLE",
-                description=rendered[:4000],
-                color=0x9b59b6
+                title="✅ Reward Vouch Received · SAMPLE",
+                description=(
+                    f"**Member:** {safe_username}\n"
+                    f"**Reward:** {safe_provider}\n"
+                    f"**Ticket:** Sample #{index + 1}\n"
+                    f"**Vouch:** {rendered[:2500]}\n\n"
+                    "**Status:** GENERATED SAMPLE — not a real customer or verified delivery."
+                ),
+                color=0xf2b84b
             )
-            embed.add_field(name="Generated username", value=safe_username, inline=True)
-            embed.add_field(name="Sample reward", value=safe_provider, inline=True)
-            embed.add_field(name="Disclosure", value="FICTIONAL SAMPLE — not a real customer review or verified delivery.", inline=False)
-            embed.set_footer(text="Trigger Rewards • Generated demonstration")
+            embed.set_footer(text="Trigger Rewards • Sample only, not verified")
             await vouch_channel.send(embed=embed)
 
             card = make_demo_vouch_image(username, provider)
