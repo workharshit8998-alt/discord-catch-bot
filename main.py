@@ -1,11 +1,9 @@
-import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error, textwrap
-from io import BytesIO
+import os, re, sqlite3, secrets, json, asyncio, urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
@@ -14,8 +12,7 @@ DB_FILE = os.getenv("TICKET_DB_PATH", "trigger_rewards.sqlite3")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SYNC_GUILD_ID = int(os.getenv("TRG_GUILD_ID", "1499228791220863110"))
-VOUCH_EVIDENCE_CHANNEL_ID = 1499228792089215108  # image/transcript channel
-VOUCH_MESSAGE_CHANNEL_ID = 1499228791891824824  # vouch embed channel
+VOUCH_MESSAGE_CHANNEL_ID = int(os.getenv("VOUCH_MESSAGE_CHANNEL_ID", "1499228791891824824"))  # vouch embed channel
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -45,11 +42,195 @@ def get_rewards(guild_id, category=None):
     return sb_request("trigger_rewards_config",params=p)
 
 
+
+
+def sb_rpc(function_name, payload):
+    """Call a SECURITY DEFINER RPC using the bot-only Supabase service role."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase service-role configuration is missing.")
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/rpc/{function_name}",
+        data=body, method="POST",
+        headers={"apikey":SUPABASE_SERVICE_ROLE_KEY,
+                 "Authorization":f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                 "Content-Type":"application/json",
+                 "Accept":"application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("Supabase delivery RPC HTTP "+str(e.code)+": "+e.read().decode("utf-8","replace")[:220]) from e
+
+
+async def deliver_real_reward(guild, claim_id, actor_label="admin"):
+    """Atomically reserve stock, DM it, then record the result. Never expose stock in a channel."""
+    reserved = sb_rpc("trg_reserve_reward_delivery", {
+        "p_claim_id": str(claim_id), "p_guild_id": str(guild.id),
+        "p_actor_discord_id": str(actor_label)
+    })
+    if isinstance(reserved, list):
+        reserved = reserved[0] if reserved else None
+    if not isinstance(reserved, dict) or not reserved.get("inventory_id"):
+        raise RuntimeError("No matching stock is available, or this claim is no longer pending.")
+    inventory_id = reserved["inventory_id"]
+    discord_id = int(reserved["discord_user_id"])
+    secret = str(reserved["secret_payload"])
+    reward_name = str(reserved["reward_name"])
+    try:
+        user = await bot.fetch_user(discord_id)
+        embed = discord.Embed(
+            title="🎁 Your Trigger Rewards prize is here!",
+            description=f"**Reward:** {reward_name}\n\n**Your reward code:**\n||{secret}||\n\nKeep this code private. Do not share passwords, account tokens, or 2FA codes.",
+            color=0xf2b84b
+        )
+        embed.set_footer(text="Trigger Rewards • Private delivery")
+        dm = await user.send(embed=embed)
+    except Exception as ex:
+        # The DM did not succeed, so releasing the reserved item is safe.
+        try:
+            sb_rpc("trg_finish_reward_delivery", {
+                "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
+                "p_message_id": None, "p_success": False,
+                "p_error": type(ex).__name__[:80]
+            })
+        except Exception as record_error:
+            print("Could not record failed reward delivery:", repr(record_error))
+        if isinstance(ex, discord.Forbidden):
+            raise RuntimeError(f"Could not DM <@{discord_id}> (DMs may be closed). Stock was returned to inventory.") from ex
+        raise RuntimeError(f"DM failed for <@{discord_id}>: {type(ex).__name__}.") from ex
+
+    # Discord accepted the DM. If finalization fails, leave stock locked in sending
+    # and do NOT release/retry it automatically: that avoids delivering the same code twice.
+    try:
+        sb_rpc("trg_finish_reward_delivery", {
+            "p_claim_id": str(claim_id), "p_inventory_id": str(inventory_id),
+            "p_message_id": str(dm.id), "p_success": True, "p_error": None
+        })
+    except Exception as ex:
+        print("DM succeeded but delivery finalization failed; inventory remains locked:", repr(ex))
+        raise RuntimeError("Discord accepted the DM, but Supabase could not confirm it. Do not retry this claim until an admin checks delivery state.") from ex
+    ticket_channel_id = reserved.get("source_ticket_channel_id")
+    if ticket_channel_id:
+        ticket_channel = guild.get_channel(int(ticket_channel_id))
+        if isinstance(ticket_channel, discord.TextChannel):
+            try:
+                rendered_message = render_ticket_message(
+                    guild.id, "delivery_confirmation_message", DEFAULT_DELIVERY_CONFIRMATION_MESSAGE,
+                    reward=discord.utils.escape_markdown(reward_name), user=f"<@{discord_id}>"
+                )
+                await ticket_channel.send(rendered_message)
+            except Exception as ticket_error:
+                print("Could not post delivery confirmation in ticket:", repr(ticket_error))
+    return f"✅ Delivered **{reward_name}** to <@{discord_id}>."
+
+
+def get_pending_real_claims(guild_id):
+    return sb_request("trg_reward_claims", params={
+        "select":"id,discord_user_id,discord_username,reward_name,status,requested_at",
+        "guild_id":"eq."+str(guild_id),
+        "status":"in.(pending,delivery_failed)",
+        "order":"requested_at.asc",
+        "limit":"25"
+    })
+
+
+
+def get_real_delivery_history(guild_id):
+    return sb_request("trg_reward_deliveries", params={
+        "select":"id,status,discord_user_id,discord_message_id,initiated_by_discord_id,attempts,created_at,sent_at,claim:trg_reward_claims(reward_name,discord_username)",
+        "claim.guild_id":"eq."+str(guild_id),
+        "order":"created_at.desc",
+        "limit":"15"
+    })
+
+
+class AddRewardStockModal(discord.ui.Modal, title="Add Real Reward Stock"):
+    category = discord.ui.TextInput(label="Category key", placeholder="minecraft", max_length=32)
+    reward = discord.ui.TextInput(label="Exact reward name", placeholder="Minecraft Rank", max_length=120)
+    region = discord.ui.TextInput(label="Region (AS / AU)", default="AS", max_length=8)
+    secret = discord.ui.TextInput(label="Actual reward code", style=discord.TextStyle.paragraph, max_length=500)
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        category_key = re.sub(r"[^a-z0-9_-]", "", str(self.category).lower().strip())
+        reward_name = str(self.reward).strip()
+        region_value = str(self.region).strip().upper()
+        secret_value = str(self.secret).strip()
+        if not category_key or not reward_name or not secret_value or region_value not in {"AS", "AU"}:
+            return await i.response.send_message("Enter a category, exact reward name, AS/AU region, and a real reward code.", ephemeral=True)
+        try:
+            matches = get_rewards(i.guild.id, category_key)
+            if not any(x["reward_name"] == reward_name for x in matches):
+                return await i.response.send_message("That exact reward is not configured in this category. Add it first, then add stock.", ephemeral=True)
+            sb_request("trg_reward_inventory", "POST", payload={
+                "guild_id":str(i.guild.id),
+                "reward_key":category_key+":"+reward_name,
+                "reward_name":reward_name,
+                "region":region_value,
+                "secret_payload":secret_value,
+                "status":"available"
+            })
+            await i.response.send_message("✅ One real reward code was added to secure inventory. It is hidden from the website and will only be sent by DM to an eligible claimant.", ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not add stock: "+str(ex)[:180], ephemeral=True)
+
+
+class PendingClaimsSelect(discord.ui.Select):
+    def __init__(self, claims):
+        self.claims = claims
+        options = []
+        for row in claims:
+            username = (row.get("discord_username") or "Discord member")[:45]
+            label = f"{username} · {row.get('reward_name','Reward')}"[:100]
+            status = row.get("status", "pending")
+            options.append(discord.SelectOption(
+                label=label,
+                value=str(row["id"]),
+                description=("Retry failed delivery" if status == "delivery_failed" else "Pending reward delivery")[:100]
+            ))
+        super().__init__(placeholder="Select pending claimants (multiple allowed)",
+                         min_values=1, max_values=len(options), options=options)
+    async def callback(self, i: discord.Interaction):
+        self.view.selected_claim_ids = list(self.values)
+        await i.response.send_message(f"Selected **{len(self.values)}** pending claim(s). Press Deliver Selected to send their matching rewards by DM.", ephemeral=True)
+
+
+class DeliveryQueueView(discord.ui.View):
+    def __init__(self, claims):
+        super().__init__(timeout=300)
+        self.selected_claim_ids = []
+        self.claims = claims
+        if claims:
+            self.add_item(PendingClaimsSelect(claims))
+    async def interaction_check(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+            return False
+        return True
+    @discord.ui.button(label="Deliver Selected", style=discord.ButtonStyle.success, emoji="📨", row=1)
+    async def deliver_selected(self, i: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_claim_ids:
+            return await i.response.send_message("Select at least one pending claimant first.", ephemeral=True)
+        await i.response.defer(ephemeral=True, thinking=True)
+        results = []
+        for claim_id in self.selected_claim_ids[:25]:
+            try:
+                results.append(await deliver_real_reward(i.guild, claim_id, str(i.user.id)))
+            except Exception as ex:
+                results.append("⚠️ "+str(ex)[:180])
+        summary = "\n".join(results)
+        await i.followup.send(summary[:1900] or "No deliveries were processed.", ephemeral=True)
+
+
+
 def database():
     c = sqlite3.connect(DB_FILE)
     c.row_factory = sqlite3.Row
     c.executescript("""
-    CREATE TABLE IF NOT EXISTS settings(guild INTEGER PRIMARY KEY, staff_role INTEGER DEFAULT 0, ticket_category INTEGER DEFAULT 0, vouch_channel INTEGER DEFAULT 0, invite_default INTEGER DEFAULT 3);
+    CREATE TABLE IF NOT EXISTS settings(guild INTEGER PRIMARY KEY, staff_role INTEGER DEFAULT 0, ticket_category INTEGER DEFAULT 0, vouch_channel INTEGER DEFAULT 0, invite_default INTEGER DEFAULT 3, invite_verified_message TEXT, delivery_confirmation_message TEXT);
     CREATE TABLE IF NOT EXISTS rewards(id INTEGER PRIMARY KEY, guild INTEGER, category TEXT, name TEXT, invites INTEGER, active INTEGER DEFAULT 1, UNIQUE(guild,category,name));
     CREATE TABLE IF NOT EXISTS tickets(channel INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, category TEXT, reward TEXT, status TEXT DEFAULT 'open', created TEXT);
     CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY, guild INTEGER, user INTEGER, reward TEXT, code TEXT UNIQUE, status TEXT DEFAULT 'issued', created TEXT, redeemed TEXT, UNIQUE(guild,user,reward));
@@ -57,9 +238,24 @@ def database():
     c.commit()
     # Migrate older databases without losing existing settings.
     settings_columns = {row["name"] for row in c.execute("PRAGMA table_info(settings)").fetchall()}
+    if "auto_delivery" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN auto_delivery INTEGER NOT NULL DEFAULT 0")
+        c.commit()
     if "vouch_template" not in settings_columns:
         c.execute("ALTER TABLE settings ADD COLUMN vouch_template TEXT NOT NULL DEFAULT 'Legit got {reward} from @TriggerPlayz'")
         c.commit()
+    if "invite_verified_message" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN invite_verified_message TEXT")
+        c.commit()
+    if "delivery_confirmation_message" not in settings_columns:
+        c.execute("ALTER TABLE settings ADD COLUMN delivery_confirmation_message TEXT")
+        c.commit()
+    c.execute("""CREATE TABLE IF NOT EXISTS vouches(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild INTEGER NOT NULL, user INTEGER NOT NULL,
+        reward TEXT NOT NULL, ticket_channel INTEGER NOT NULL, confirmed_at TEXT NOT NULL,
+        UNIQUE(guild, ticket_channel)
+    )""")
+    c.commit()
     # Migrate older databases: users may claim the same reward again after its cooldown.
     schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'").fetchone()
     if schema and "UNIQUE(guild,user,reward)" in (schema["sql"] or "").replace(" ", ""):
@@ -83,6 +279,12 @@ def database():
     return c
 
 DEFAULT_VOUCH_TEMPLATE = "Legit got {reward} from @TriggerPlayz"
+DEFAULT_INVITE_VERIFIED_MESSAGE = ("✅ Invite requirement verified. Your reward is now pending delivery. "
+    "Once you receive the actual reward code by DM, say **Legit** to add your name to our vouch database. "
+    "This ticket will be deleted automatically after your confirmation.")
+DEFAULT_DELIVERY_CONFIRMATION_MESSAGE = ("✅ The actual **{reward}** code was sent privately to {user}. "
+    "If you received it, reply **Legit** to add your name to our vouch database. "
+    "This ticket will be deleted automatically after your confirmation.")
 
 def get_vouch_template(guild_id):
     c = database()
@@ -99,6 +301,35 @@ def save_vouch_template(guild_id, template):
     )
     c.commit()
     c.close()
+
+
+def get_ticket_message(guild_id, column, default):
+    if column not in {"invite_verified_message", "delivery_confirmation_message"}:
+        raise ValueError("Unsupported message setting.")
+    c = database()
+    row = c.execute(f"SELECT {column} FROM settings WHERE guild=?", (guild_id,)).fetchone()
+    c.close()
+    return row[column] if row and row[column] else default
+
+
+def save_ticket_messages(guild_id, invite_message, delivery_message):
+    c = database()
+    c.execute(
+        "INSERT INTO settings(guild, invite_verified_message, delivery_confirmation_message) VALUES(?,?,?) "
+        "ON CONFLICT(guild) DO UPDATE SET invite_verified_message=excluded.invite_verified_message, "
+        "delivery_confirmation_message=excluded.delivery_confirmation_message",
+        (guild_id, invite_message, delivery_message)
+    )
+    c.commit()
+    c.close()
+
+
+def render_ticket_message(guild_id, column, default, **values):
+    template = get_ticket_message(guild_id, column, default)
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError, IndexError):
+        return default.format(**values)
 
 def cooldown_seconds(c, guild_id, user_id, reward_name):
     row = c.execute(
@@ -323,6 +554,40 @@ async def auto_verify_falcon_report(message):
                 c.close()
                 await message.channel.send("⚠️ Code registration failed, so no code was issued. Staff must check this ticket.")
                 return
+            # Create the shared, server-only pending claim. This is the only source shown in the DM delivery queue.
+            try:
+                already_created = sb_request("trg_reward_claims", params={
+                    "select":"id,status",
+                    "source_ticket_channel_id":"eq."+str(message.channel.id),
+                    "limit":"1"
+                })
+                if already_created:
+                    raise RuntimeError("This ticket already has a real-reward claim; duplicate invite-log event ignored.")
+                pending = sb_request("trg_reward_claims", "POST", payload={
+                    "guild_id":str(message.guild.id),
+                    "discord_user_id":str(member.id),
+                    "discord_username":member.display_name[:100],
+                    "reward_key":t["category"]+":"+t["reward"],
+                    "reward_name":t["reward"],
+                    "source_ticket_channel_id":str(message.channel.id),
+                    "status":"pending"
+                })
+                if not pending:
+                    raise RuntimeError("Supabase did not return the pending claim.")
+            except Exception as ex:
+                # Do not leave a website verification code active if the real-delivery claim failed to persist.
+                try:
+                    sb_request("trigger_reward_valid_codes", "PATCH", params={
+                        "guild_id":"eq."+str(message.guild.id), "code_value":"eq."+code
+                    }, payload={"active":False})
+                except Exception:
+                    pass
+                c = database()
+                c.execute("DELETE FROM claims WHERE guild=? AND user=? AND reward=? AND code=?", (message.guild.id, member.id, t["reward"], code))
+                c.commit(); c.close()
+                await message.channel.send("⚠️ Your invite check passed, but the shared delivery claim could not be saved. No reward code was issued. Staff must check Supabase.")
+                return
+            claim_id = pending[0]["id"] if isinstance(pending, list) else pending.get("id")
             # Consume only the invite requirement for this reward, not the entire cumulative total.
             # This preserves any surplus invites for the member's next claim.
             c = database()
@@ -335,25 +600,34 @@ async def auto_verify_falcon_report(message):
             c.commit()
             c.close()
             dm = discord.Embed(
-                title="🎉 Your reward is approved!",
+                title="🎟️ Your website verification code is ready!",
                 description=(
                     f"**Reward:** {t['reward']}\n"
-                    f"**Your code:** ||{code}||\n\n"
+                    f"**Website verification code (not the actual prize):** ||{code}||\n\n"
                     f"[Claim here]({SITE_URL})\n\n"
-                    "Keep this code private. It is unique to you and this reward."
+                    "Keep this verification code private. Your actual reward code is delivered separately by the bot after staff delivery."
                 ),
                 color=0x57f287
             )
-            # Post the same reward embed in the ticket and in the member's DM.
+            # The 12-character website code remains the legacy verification/timer code.
+            # Actual reward stock is sent separately only through the secure delivery workflow.
             await message.channel.send(embed=dm)
             try:
                 await member.send(embed=dm)
             except discord.Forbidden:
-                await message.channel.send(f"{member.mention} I couldn't DM you, so your reward embed is available above in this ticket.")
-            await message.channel.send(
-                f"**Did you receive your reward?** Reply with **Legit** to submit your vouch.\n"
-                f"Example: Legit got {t['reward']} from @TriggerPlayz"
+                await message.channel.send(f"{member.mention} I couldn't DM the website verification code. Please enable DMs and ask staff for help.")
+            # Optional automatic real-reward delivery. Disabled by default; admins enable it explicitly.
+            try:
+                if cfg(message.guild.id).get("auto_delivery") and claim_id:
+                    result = await deliver_real_reward(message.guild, claim_id, "auto")
+                    await message.channel.send(result)
+            except Exception as delivery_error:
+                await message.channel.send("⚠️ Automatic real-reward delivery did not complete: "+str(delivery_error)[:180]+" Use /admin-panel → Pending DM Deliveries to retry.")
+            invite_message = render_ticket_message(
+                message.guild.id, "invite_verified_message", DEFAULT_INVITE_VERIFIED_MESSAGE,
+                reward=discord.utils.escape_markdown(t["reward"]), user=member.mention
             )
+            await message.channel.send(invite_message)
             # Keep successful tickets open so the member can say "Legit"; evidence is captured then.
             return
         await asyncio.sleep(15)
@@ -369,16 +643,16 @@ async def auto_verify_falcon_report(message):
         print("Automatic invite verification failed:", repr(ex))
         try:
             await message.channel.send("⚠️ Automatic verification hit an error. Staff must check this ticket; it will not be deleted.")
-        except Exception:
-            pass
+        except Exception:            pass
 
 
 async def capture_legit_evidence(message):
-    """When the ticket owner says Legit after a code was issued, create a transcript image and post it to the evidence channel."""
+    """Post the member's Legit acknowledgement and remove the ticket after 15 seconds."""
     if not message.guild or not isinstance(message.channel, discord.TextChannel):
         return
     if message.author.bot or message.content.strip().casefold() not in {"legit", "legit!", "legit."}:
         return
+
     c = database()
     ticket = c.execute(
         "SELECT * FROM tickets WHERE channel=? AND guild=? AND status='open'",
@@ -387,155 +661,87 @@ async def capture_legit_evidence(message):
     if not ticket or int(ticket["user"]) != message.author.id or not ticket["reward"]:
         c.close()
         return
-    claim = c.execute(
-        "SELECT * FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
+    local_claim = c.execute(
+        "SELECT id FROM claims WHERE guild=? AND user=? AND reward=? AND status='issued' ORDER BY id DESC LIMIT 1",
         (message.guild.id, message.author.id, ticket["reward"])
     ).fetchone()
-    if not claim:
-        c.close()
+    c.close()
+    if not local_claim:
         return
-    # Mark this ticket as processed before awaiting network operations to avoid duplicate evidence posts.
+
+    # Prevent duplicate vouch posts while preserving the original ticket-owner checks.
+    c = database()
     c.execute("UPDATE tickets SET status='legit_received' WHERE channel=?", (message.channel.id,))
     c.commit()
     c.close()
+
     try:
-        # Evidence image should contain ONLY the reward-issued message and the member's Legit reply.
-        # Never screenshot the whole ticket conversation.
-        history = [m async for m in message.channel.history(limit=60, before=message, oldest_first=False)]
-        reward_message = None
-        for candidate in history:
-            if not candidate.author.bot:
-                continue
-            parts = [candidate.content or ""]
-            for emb in candidate.embeds:
-                parts.extend([emb.title or "", emb.description or ""])
-                parts.extend(f"{field.name} {field.value}" for field in emb.fields)
-            combined = "\n".join(parts).casefold()
-            has_code = "your code" in combined or "reward code" in combined
-            has_reward = ticket["reward"].casefold() in combined
-            if has_code and has_reward:
-                reward_message = candidate
-                break
-        evidence_messages = ([reward_message] if reward_message else []) + [message]
-        messages = []
-        for item in evidence_messages:
-            stamp = item.created_at.strftime("%I:%M %p").lstrip("0")
-            content = item.content or ""
-            for emb in item.embeds[:2]:
-                if emb.title:
-                    content += ("\n" if content else "") + emb.title
-                if emb.description:
-                    content += ("\n" if content else "") + emb.description
-                for field in emb.fields[:5]:
-                    content += ("\n" if content else "") + f"{field.name}: {field.value}"
-            if item.attachments:
-                content += ("\n" if content else "") + "[attachment: " + ", ".join(a.filename for a in item.attachments[:3]) + "]"
-            content = content.strip() or "[embed / attachment]"
-            # Render Markdown as readable chat text instead of raw **bold** and link syntax.
-            content = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", content)
-            content = re.sub(r"<@!?(\d+)>", "@member", content)
-            content = re.sub(r"<#(\d+)>", "#channel", content)
-            content = content.replace("**", "").replace("__", "").replace("~~", "").replace(chr(96), "")
-            content = re.sub(r"(?m)^\s*>\s?", "", content)
-            # Never expose a reward code in the public evidence image.
-            content = re.sub(r"(?i)(your code\s*:\s*)\|\|.*?\|\|", r"\1[SPOILER HIDDEN]", content)
-            content = re.sub(r"(?i)(your code\s*:\s*).*", r"\1[SPOILER HIDDEN]", content)
-            # The image is a transcript rendering, not a literal Discord screenshot.
-            safe = content.encode("latin-1", "replace").decode("latin-1")
-            body = []
-            for paragraph in safe.splitlines() or [""]:
-                body.extend(textwrap.wrap(paragraph, width=72) or [""])
-            avatar_bytes = None
-            try:
-                avatar_bytes = await item.author.display_avatar.replace(size=64).read()
-            except Exception:
-                pass
-            messages.append((item.author.display_name.encode("latin-1", "replace").decode("latin-1"),
-                             stamp, body, item.author.bot, item.author.display_name[:1].upper() or "?", avatar_bytes))
-        width, padding = 1000, 34
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 17)
-            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 17)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-        except OSError:
-            font = ImageFont.load_default()
-            font_bold = font
-            font_small = font
-        row_heights = [max(82, 54 + len(body) * 27) for _, _, body, _, _, _ in messages]
-        height = max(440, 132 + sum(row_heights) + 80)
-        image = Image.new("RGB", (width, min(height, 6000)), (49, 51, 56))
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, width, 66), fill=(35, 36, 40))
-        draw.text((padding, 22), "#  " + message.channel.name, fill=(245, 245, 247), font=font_bold)
-        draw.line((padding, 67, width-padding, 67), fill=(25, 26, 29), width=2)
-        draw.text((padding, 86), message.created_at.strftime("%B %d, %Y"), fill=(160, 163, 170), font=font_small)
-        y = 122
-        palette = [(88, 101, 242), (235, 69, 158), (87, 242, 135), (242, 184, 75)]
-        for idx, (author, stamp, body, is_bot, initial, avatar_bytes) in enumerate(messages):
-            row_h = row_heights[idx]
-            if y + row_h > image.height - 20:
-                break
-            avatar_color = palette[idx % len(palette)]
-            avatar_box = (padding, y + 4, padding + 42, y + 46)
-            if avatar_bytes:
-                try:
-                    avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA").resize((42, 42))
-                    mask = Image.new("L", (42, 42), 0)
-                    ImageDraw.Draw(mask).ellipse((0, 0, 41, 41), fill=255)
-                    image.paste(avatar, (padding, y + 4), mask)
-                except Exception:
-                    draw.ellipse(avatar_box, fill=avatar_color)
-                    draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
-            else:
-                draw.ellipse(avatar_box, fill=avatar_color)
-                draw.text((padding + 16, y + 16), initial, fill=(255, 255, 255), font=font_bold)
-            name_color = (88, 101, 242) if is_bot else (240, 240, 242)
-            draw.text((padding + 58, y + 4), author[:42], fill=name_color, font=font_bold if is_bot else font)
-            name_width = draw.textbbox((padding + 58, y + 4), author[:42], font=font)[2]
-            draw.text((min(name_width + 12, width - 150), y + 6), stamp, fill=(163, 166, 173), font=font_small)
-            text_y = y + 30
-            for line in body:
-                if text_y > image.height - 25:
-                    break
-                draw.text((padding + 58, text_y), line[:100], fill=(220, 221, 224), font=font)
-                text_y += 24
-            y += row_h
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
-        target = message.guild.get_channel(VOUCH_EVIDENCE_CHANNEL_ID)
-        if not isinstance(target, discord.TextChannel):
-            target = await message.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
+        # Use the configured vouch channel; allow the host environment to override the default.
+        configured_channel_id = int(cfg(message.guild.id).get("vouch_channel") or VOUCH_MESSAGE_CHANNEL_ID)
+        vouch_target = message.guild.get_channel(configured_channel_id)
+        if not isinstance(vouch_target, discord.TextChannel):
+            vouch_target = await message.guild.fetch_channel(configured_channel_id)
+        if not isinstance(vouch_target, discord.TextChannel) or vouch_target.guild.id != message.guild.id:
+            raise RuntimeError(f"Vouch channel {configured_channel_id} is not a text channel in this server.")
+        bot_member = message.guild.me or await message.guild.fetch_member(bot.user.id)
+        perms = vouch_target.permissions_for(bot_member)
+        if not perms.view_channel or not perms.send_messages or not perms.embed_links:
+            raise RuntimeError(f"Bot needs View Channel, Send Messages and Embed Links in vouch channel {configured_channel_id}.")
+
+        template = get_vouch_template(message.guild.id)
+        rendered = template.format(
+            reward=discord.utils.escape_markdown(ticket["reward"]),
+            user=message.author.mention,
+            ticket=discord.utils.escape_markdown(message.channel.name)
+        )
         embed = discord.Embed(
             title="✅ Reward Vouch Received",
-            description=f"**Member:** {message.author.mention}\n**Reward:** {ticket['reward']}\n**Ticket:** #{message.channel.name}\n**Vouch:** Legit\n\n**Vouch message:** {get_vouch_template(message.guild.id).format(reward=ticket['reward'], user=message.author.mention, ticket=message.channel.name)}",
+            description=(
+                f"**Member:** {message.author.mention}\n"
+                f"**Reward:** {discord.utils.escape_markdown(ticket['reward'])}\n"
+                f"**Ticket:** #{discord.utils.escape_markdown(message.channel.name)}\n"
+                f"**Vouch:** Legit\n\n"
+                f"**Vouch message:** {rendered[:1800]}\n\n"
+                "Reward follow-up: the reward will be provided shortly. "
+                "Verification details: https://discord.com/channels/1499228791220863110/1499322272861913169"
+            ),
             color=0xf2b84b
         )
-        # Send the transcript image to the original evidence channel.
-        await target.send(file=discord.File(buffer, filename=f"reward-vouch-{message.author.id}.png"))
-        # Send the vouch embed separately to the newly specified vouch channel.
-        vouch_target = message.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
-        if not isinstance(vouch_target, discord.TextChannel):
-            vouch_target = await message.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        embed.set_footer(text="Trigger Rewards • Member acknowledgement")
         await vouch_target.send(embed=embed)
-        await message.channel.send("✅ Thanks! Your conversation image and vouch have been posted to their configured channels. This ticket will close in 10 seconds.")
-        await asyncio.sleep(10)
+
+        c = database()
+        c.execute(
+            "INSERT OR IGNORE INTO vouches(guild,user,reward,ticket_channel,confirmed_at) VALUES(?,?,?,?,?)",
+            (message.guild.id, message.author.id, ticket["reward"], message.channel.id, datetime.now(timezone.utc).isoformat())
+        )
+        c.commit()
+        c.close()
+
+        await message.channel.send(
+            f"✅ Thanks! Your vouch has been posted in {vouch_target.mention}. "
+            "Your reward will be provided shortly. This ticket will be deleted in 15 seconds."
+        )
+        await asyncio.sleep(15)
         c = database()
         c.execute("UPDATE tickets SET status='closed' WHERE channel=?", (message.channel.id,))
         c.commit()
         c.close()
         try:
-            await message.channel.delete(reason="Reward vouch evidence captured")
+            await message.channel.delete(reason="Member submitted Legit acknowledgement")
         except discord.Forbidden:
-            pass
+            print("Cannot delete ticket: bot needs Manage Channels permission.")
     except Exception as ex:
-        print("Could not capture reward vouch evidence:", repr(ex))
+        print(f"Could not post Legit acknowledgement to channel {VOUCH_MESSAGE_CHANNEL_ID}:", repr(ex))
         c = database()
         c.execute("UPDATE tickets SET status='open' WHERE channel=?", (message.channel.id,))
         c.commit()
         c.close()
         try:
-            await message.channel.send("⚠️ I couldn't send the vouch evidence. Please check the bot's channel permissions.")
+            await message.channel.send(
+                f"⚠️ I couldn't post your vouch: {type(ex).__name__}: {str(ex)[:250]} "
+                "Please check the vouch channel ID and the bot's View Channel, Send Messages and Embed Links permissions."
+            )
         except Exception:
             pass
 
@@ -553,11 +759,82 @@ class CloseView(discord.ui.View):
         c=database(); c.execute("UPDATE tickets SET status='closed' WHERE channel=?",(i.channel_id,)); c.commit(); c.close()
         await i.response.send_message("🔒 Ticket closed.")
 
+class DeleteAllTicketsView(discord.ui.View):
+    def __init__(self, requester_id):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+
+    async def interaction_check(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+            return False
+        if i.user.id != self.requester_id:
+            await i.response.send_message("Only the administrator who started this action can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm delete all tickets", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm_delete(self, i: discord.Interaction, button: discord.ui.Button):
+        await i.response.edit_message(content="🗑️ Deleting tracked reward ticket channels…", view=None)
+        c = database()
+        rows = c.execute("SELECT channel FROM tickets WHERE guild=? AND status!='deleted'", (i.guild.id,)).fetchall()
+        channel_ids = [int(row["channel"]) for row in rows]
+        deleted = missing = failed = 0
+        for channel_id in channel_ids:
+            channel = i.guild.get_channel(channel_id)
+            if channel is None:
+                missing += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
+                continue
+            try:
+                await channel.delete(reason=f"Bulk ticket cleanup requested by {i.user} ({i.user.id})")
+                deleted += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
+            except discord.NotFound:
+                missing += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+        c.commit()
+        c.close()
+        await i.followup.send(
+            f"✅ Ticket cleanup finished. Deleted: **{deleted}** · Already missing: **{missing}** · Failed: **{failed}**. "
+            "Only channels recorded as Trigger Rewards tickets were targeted; other server channels were untouched.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel_delete(self, i: discord.Interaction, button: discord.ui.Button):
+        await i.response.edit_message(content="Cancelled. No ticket channels were deleted.", view=None)
+
+
 @bot.event
 async def on_message(message):
     await auto_verify_falcon_report(message)
     await capture_legit_evidence(message)
     await bot.process_commands(message)
+
+@bot.command(name="sync")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def sync_commands(ctx):
+    guild = discord.Object(id=ctx.guild.id)
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        await ctx.reply(f"✅ Synced **{len(synced)}** slash command(s) to **{ctx.guild.name}**.", mention_author=False)
+    except Exception as ex:
+        await ctx.reply(f"❌ Command sync failed: {type(ex).__name__}: {str(ex)[:180]}", mention_author=False)
+
+@sync_commands.error
+async def sync_commands_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("🔒 Only server administrators can use !sync.", mention_author=False)
+    elif isinstance(error, commands.NoPrivateMessage):
+        return
+    else:
+        await ctx.reply("❌ I couldn't run !sync. Check the bot logs for details.", mention_author=False)
+
 
 @bot.event
 async def on_ready():
@@ -723,6 +1000,50 @@ class VouchTemplateModal(discord.ui.Modal):
             await i.response.send_message("Could not save vouch message: " + str(ex)[:180], ephemeral=True)
 
 
+class TicketMessagesModal(discord.ui.Modal, title="Edit Ticket Messages"):
+    def __init__(self, invite_message, delivery_message):
+        super().__init__(title="Edit Ticket Messages")
+        self.invite_message = discord.ui.TextInput(
+            label="After invite requirement verified",
+            style=discord.TextStyle.paragraph,
+            default=invite_message[:500],
+            max_length=500
+        )
+        self.delivery_message = discord.ui.TextInput(
+            label="After actual reward DM sent",
+            style=discord.TextStyle.paragraph,
+            default=delivery_message[:500],
+            max_length=500
+        )
+        self.add_item(self.invite_message)
+        self.add_item(self.delivery_message)
+
+    async def on_submit(self, i: discord.Interaction):
+        if not i.guild or not i.user.guild_permissions.administrator:
+            return await i.response.send_message("Administrator only.", ephemeral=True)
+        invite_text = str(self.invite_message).strip()
+        delivery_text = str(self.delivery_message).strip()
+        if not invite_text or not delivery_text:
+            return await i.response.send_message("Both messages must contain text.", ephemeral=True)
+        allowed = {"reward", "user"}
+        for template in (invite_text, delivery_text):
+            placeholders = re.findall(r"\{([^{}]+)\}", template)
+            if any(name not in allowed for name in placeholders):
+                return await i.response.send_message("Unsupported placeholder. Use only {reward} and {user}.", ephemeral=True)
+            try:
+                template.format(reward="Reward", user="@member")
+            except (KeyError, ValueError, IndexError):
+                return await i.response.send_message("Invalid message formatting. Check your braces and placeholders.", ephemeral=True)
+        try:
+            save_ticket_messages(i.guild.id, invite_text, delivery_text)
+            await i.response.send_message(
+                "✅ Ticket messages saved. New tickets will use your updated wording. Placeholders: {reward}, {user}.",
+                ephemeral=True, view=AdminPanel()
+            )
+        except Exception as ex:
+            await i.response.send_message("Could not save ticket messages: " + str(ex)[:180], ephemeral=True)
+
+
 class AdminPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -765,6 +1086,57 @@ class AdminPanel(discord.ui.View):
         except Exception as ex:
             await i.response.send_message("Could not open vouch editor: " + str(ex)[:180], ephemeral=True)
 
+    @discord.ui.button(label="Edit Ticket Messages", style=discord.ButtonStyle.primary, emoji="💬", row=2)
+    async def edit_ticket_messages(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            await i.response.send_modal(TicketMessagesModal(
+                get_ticket_message(i.guild.id, "invite_verified_message", DEFAULT_INVITE_VERIFIED_MESSAGE),
+                get_ticket_message(i.guild.id, "delivery_confirmation_message", DEFAULT_DELIVERY_CONFIRMATION_MESSAGE)
+            ))
+        except Exception as ex:
+            await i.response.send_message("Could not open ticket message editor: " + str(ex)[:180], ephemeral=True)
+
+
+    @discord.ui.button(label="Add Real Reward Stock", style=discord.ButtonStyle.success, emoji="📦", row=3)
+    async def add_real_stock(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.send_modal(AddRewardStockModal())
+
+    @discord.ui.button(label="Pending DM Deliveries", style=discord.ButtonStyle.success, emoji="📨", row=3)
+    async def pending_deliveries(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            claims = get_pending_real_claims(i.guild.id)
+            if not claims:
+                return await i.response.send_message("There are no pending or failed real-reward deliveries right now.", ephemeral=True)
+            embed = discord.Embed(
+                title="📨 Pending Reward Deliveries",
+                description="Only verified claimants awaiting delivery are listed. Select one or more people, then deliver each matching reward. No server-wide DMs.",
+                color=0xf2b84b
+            )
+            embed.set_footer(text=f"{len(claims)} claim(s) shown • maximum 25 per page")
+            await i.response.send_message(embed=embed, view=DeliveryQueueView(claims), ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not load pending deliveries: "+str(ex)[:180], ephemeral=True)
+
+
+    @discord.ui.button(label="Delivery History", style=discord.ButtonStyle.secondary, emoji="📜", row=4)
+    async def delivery_history(self, i: discord.Interaction, b: discord.ui.Button):
+        try:
+            rows = get_real_delivery_history(i.guild.id)
+            if not rows:
+                return await i.response.send_message("No real-reward delivery attempts have been recorded yet.", ephemeral=True)
+            lines = []
+            for row in rows[:15]:
+                claim = row.get("claim") or {}
+                reward = claim.get("reward_name", "Reward")
+                username = claim.get("discord_username") or row.get("discord_user_id")
+                sent = row.get("sent_at") or row.get("created_at", "")
+                lines.append(f"**{reward}** → {username} · {row.get('status','unknown')} · attempts: {row.get('attempts',0)} · {str(sent)[:19]}")
+            embed = discord.Embed(title="📜 Real Reward Delivery History", description="\n".join(lines)[:3900], color=0xf2b84b)
+            embed.set_footer(text="Latest 15 attempts • No reward codes are shown here")
+            await i.response.send_message(embed=embed, ephemeral=True)
+        except Exception as ex:
+            await i.response.send_message("Could not load delivery history: "+str(ex)[:180], ephemeral=True)
+
     @discord.ui.button(label="Ticket Setup Help", style=discord.ButtonStyle.secondary, emoji="🎟️", row=2)
     async def ticket_help(self, i: discord.Interaction, b: discord.ui.Button):
         e = discord.Embed(title="🎟️ Ticket Setup", description="1. Run /ticket-setup and select the public channel.\n2. Optionally choose a Discord category for new ticket channels.\n3. Run /staff-role to set who can view tickets.\n4. Add categories and rewards here.\n5. Test by opening a ticket as a regular member.", color=0xf2b84b)
@@ -776,9 +1148,138 @@ class AdminPanel(discord.ui.View):
 async def admin_panel(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
-    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template here; placeholders: {reward}, {user}, {ticket}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
+    e = discord.Embed(title="⚙️ TRIGGER REWARDS • ADMIN CONTROL", description="Manage reward categories, invite requirements and ticket setup directly inside Discord. No admin website required.\n\nCategories — add or edit the category label and emoji.\nRewards — add or edit inner rewards, invite requirements, and reward text.\nValid codes — use Add Valid Code to choose the category, exact reward, and accepted code.\nVouch message — edit the vouch post template; placeholders: {reward}, {user}, {ticket}.\nTicket messages — edit invite-verified and actual-delivery messages; placeholders: {reward}, {user}.\nView Setup — inspect active categories and rewards.", color=0xf2b84b)
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
+
+
+@bot.tree.command(name="vouch-add", description="Post clearly labelled demo vouches for layout testing")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 10]):
+    """Generate demo-only sample vouches; these are never genuine customer testimonials."""
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+    target = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+    if not isinstance(target, discord.TextChannel):
+        try:
+            target = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        except Exception:
+            target = None
+    if not isinstance(target, discord.TextChannel):
+        return await i.response.send_message(
+            "The configured vouch channel could not be found. Check VOUCH_MESSAGE_CHANNEL_ID.",
+            ephemeral=True
+        )
+
+    first_names = ["Nova", "Pixel", "Shadow", "Lunar", "Frost", "Blaze", "Echo", "Astra", "Raven", "Cobalt"]
+    second_names = ["Fox", "Wolf", "Byte", "Craft", "Spark", "Knight", "Cloud", "Ninja", "Drift", "Quest"]
+    providers = ["Minecraft Rank", "YouTube Premium", "Streaming Reward"]
+    posted = 0
+    failures = []
+    for index in range(number):
+        username = f"{secrets.choice(first_names)}{secrets.choice(second_names)}{secrets.randbelow(9000) + 1000}"
+        provider = secrets.choice(providers)
+        safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username))
+        safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(provider))
+        try:
+            template = get_vouch_template(i.guild.id)
+            rendered = template.format(reward=safe_provider, user=safe_username, ticket="DEMO")
+            embed = discord.Embed(
+                title="🧪 DEMO VOUCH • NOT VERIFIED",
+                description=(
+                    f"**Member (sample):** {safe_username}\n"
+                    f"**Reward (sample):** {safe_provider}\n"
+                    f"**Ticket:** Demo #{index + 1}\n"
+                    f"**Vouch:** {rendered[:1800]}\n\n"
+                    "**Status:** GENERATED DEMO — not a real customer or verified delivery."
+                ),
+                color=0x9b59b6
+            )
+            embed.set_footer(text="Trigger Rewards • Demo only, not verified")
+            await target.send(embed=embed)
+            posted += 1
+            await asyncio.sleep(0.5)
+        except Exception as ex:
+            failures.append(f"{index + 1}: {type(ex).__name__}")
+    summary = f"Posted **{posted}/{number}** clearly labelled demo vouches in {target.mention}."
+    if failures:
+        summary += "\nFailed: " + ", ".join(failures[:10])
+    await i.response.send_message(summary, ephemeral=True)
+
+
+@bot.tree.command(name="fake-vouch", description="Post one clearly labelled demo vouch")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def fake_vouch(
+    i: discord.Interaction,
+    username: app_commands.Range[str, 1, 80],
+    user_provider: app_commands.Range[str, 1, 80]
+):
+    """Post a DEMO-only sample; it never creates or verifies a real reward claim."""
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+    target = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+    if not isinstance(target, discord.TextChannel):
+        try:
+            target = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        except Exception:
+            target = None
+    if not isinstance(target, discord.TextChannel):
+        return await i.response.send_message(
+            "The configured vouch channel could not be found. Check VOUCH_MESSAGE_CHANNEL_ID.",
+            ephemeral=True
+        )
+
+    safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username.strip()))
+    safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(user_provider.strip()))
+    try:
+        template = get_vouch_template(i.guild.id)
+        rendered = template.format(reward=safe_provider, user=safe_username, ticket="DEMO")
+    except (KeyError, ValueError, IndexError):
+        return await i.response.send_message(
+            "Your saved vouch template could not be rendered. Check /admin-panel → Edit Vouch Message.",
+            ephemeral=True
+        )
+    embed = discord.Embed(
+        title="🧪 DEMO VOUCH • NOT VERIFIED",
+        description=(
+            f"**Member (demo text):** {safe_username}\n"
+            f"**Reward (demo):** {safe_provider}\n"
+            f"**Vouch:** {rendered[:1800]}\n\n"
+            "**Status:** DEMO ONLY — not a real customer review or verified delivery."
+        ),
+        color=0x9b59b6
+    )
+    embed.set_footer(text="Trigger Rewards • Admin-created demonstration")
+    try:
+        await target.send(embed=embed)
+        await i.response.send_message(
+            f"✅ Demo vouch posted in {target.mention}. It is labelled DEMO and does not count as a verified vouch.",
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await i.response.send_message(
+            "I cannot post in the vouch channel. Give the bot View Channel, Send Messages and Embed Links permissions.",
+            ephemeral=True
+        )
+    except Exception as ex:
+        await i.response.send_message("Could not post demo vouch: " + str(ex)[:160], ephemeral=True)
+
+
+@bot.tree.command(name="reward-auto-delivery", description="Enable or disable automatic real reward DMs after invite verification")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def reward_auto_delivery(i: discord.Interaction, enabled: bool):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+    c = database()
+    c.execute("INSERT INTO settings(guild,auto_delivery) VALUES(?,?) ON CONFLICT(guild) DO UPDATE SET auto_delivery=excluded.auto_delivery",
+              (i.guild.id, 1 if enabled else 0))
+    c.commit(); c.close()
+    state = "enabled" if enabled else "disabled"
+    await i.response.send_message(f"Automatic real-reward DM delivery is now **{state}**. It only runs for verified ticket claims with matching available stock.", ephemeral=True)
+
 
 @bot.tree.command(name="ticket-setup",description="Post the Trigger Rewards ticket panel")
 @app_commands.guild_only()
@@ -889,6 +1390,23 @@ async def redeem(i:discord.Interaction,code:str):
         return await i.response.send_message("Website code could not be invalidated, so the local claim was left unchanged. Try again. Details: " + str(ex)[:120],ephemeral=True)
     c.execute("UPDATE claims SET status='redeemed',redeemed=? WHERE id=?",(datetime.now(timezone.utc).isoformat(),row["id"])); c.commit(); c.close()
     await i.response.send_message(f"Code redeemed and invalidated on the website. Reward: **{row['reward']}**.",ephemeral=True)
+
+@bot.tree.command(name="delete-all", description="Delete all Trigger Rewards ticket channels in this server")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def delete_all_tickets(i: discord.Interaction):
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
+    c = database()
+    count = c.execute("SELECT COUNT(*) AS total FROM tickets WHERE guild=? AND status!='deleted'", (i.guild.id,)).fetchone()["total"]
+    c.close()
+    if not count:
+        return await i.response.send_message("There are no tracked Trigger Rewards ticket channels to delete.", ephemeral=True)
+    await i.response.send_message(
+        f"⚠️ This will permanently delete **{count}** channel(s) recorded as Trigger Rewards tickets. It will not touch other server channels. Confirm?",
+        view=DeleteAllTicketsView(i.user.id), ephemeral=True
+    )
+
 
 @bot.tree.command(name="close-ticket",description="Close your current reward ticket")
 @app_commands.guild_only()
