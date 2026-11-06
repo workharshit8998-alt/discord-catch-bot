@@ -785,22 +785,24 @@ class DeleteAllTicketsView(discord.ui.View):
     async def confirm_delete(self, i: discord.Interaction, button: discord.ui.Button):
         await i.response.edit_message(content="🗑️ Deleting tracked reward ticket channels…", view=None)
         c = database()
-        rows = c.execute("SELECT channel FROM tickets WHERE guild=?", (i.guild.id,)).fetchall()
+        rows = c.execute("SELECT channel FROM tickets WHERE guild=? AND status!='deleted'", (i.guild.id,)).fetchall()
         channel_ids = [int(row["channel"]) for row in rows]
         deleted = missing = failed = 0
         for channel_id in channel_ids:
             channel = i.guild.get_channel(channel_id)
             if channel is None:
                 missing += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
                 continue
             try:
                 await channel.delete(reason=f"Bulk ticket cleanup requested by {i.user} ({i.user.id})")
                 deleted += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
             except discord.NotFound:
                 missing += 1
+                c.execute("UPDATE tickets SET status='deleted' WHERE guild=? AND channel=?", (i.guild.id, channel_id))
             except (discord.Forbidden, discord.HTTPException):
                 failed += 1
-        c.execute("UPDATE tickets SET status='deleted' WHERE guild=?", (i.guild.id,))
         c.commit()
         c.close()
         await i.followup.send(
@@ -1404,7 +1406,7 @@ async def delete_all_tickets(i: discord.Interaction):
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("🔒 Server administrators only.", ephemeral=True)
     c = database()
-    count = c.execute("SELECT COUNT(*) AS total FROM tickets WHERE guild=?", (i.guild.id,)).fetchone()["total"]
+    count = c.execute("SELECT COUNT(*) AS total FROM tickets WHERE guild=? AND status!='deleted'", (i.guild.id,)).fetchone()["total"]
     c.close()
     if not count:
         return await i.response.send_message("There are no tracked Trigger Rewards ticket channels to delete.", ephemeral=True)
