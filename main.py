@@ -1064,6 +1064,69 @@ async def admin_panel(i: discord.Interaction):
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
+@bot.tree.command(name="fake-vouch", description="Post a clearly labelled demo vouch using the saved vouch template")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def fake_vouch(
+    i: discord.Interaction,
+    username: app_commands.Range[str, 1, 80],
+    user_provider: app_commands.Range[str, 1, 80]
+):
+    """Create a DEMO-only sample; it never creates or verifies a real reward claim."""
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+
+    target = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+    if not isinstance(target, discord.TextChannel):
+        try:
+            target = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        except Exception:
+            target = None
+    if not isinstance(target, discord.TextChannel):
+        return await i.response.send_message(
+            "The configured vouch channel could not be found. Check VOUCH_MESSAGE_CHANNEL_ID.",
+            ephemeral=True
+        )
+
+    safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username.strip()))
+    safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(user_provider.strip()))
+    try:
+        template = get_vouch_template(i.guild.id)
+        rendered = template.format(
+            reward=safe_provider,
+            user=safe_username,
+            ticket="DEMO"
+        )
+    except (KeyError, ValueError, IndexError) as ex:
+        return await i.response.send_message(
+            "Your saved vouch template could not be rendered. Check it in /admin-panel → Edit Vouch Message.",
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="🧪 DEMO VOUCH • NOT VERIFIED",
+        description=rendered,
+        color=0x9b59b6
+    )
+    embed.add_field(name="Username (demo text)", value=safe_username[:1024], inline=True)
+    embed.add_field(name="User provider (demo)", value=safe_provider[:1024], inline=True)
+    embed.add_field(name="Status", value="DEMO / FAKE — not a real customer review or verified delivery", inline=False)
+    embed.set_footer(text="Trigger Rewards • Admin-created demonstration")
+    try:
+        await target.send(embed=embed)
+        await i.response.send_message(
+            f"✅ Demo vouch posted in {target.mention}. It is labelled DEMO and does not count as a verified vouch.",
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await i.response.send_message(
+            "I cannot post in the vouch channel. Give the bot View Channel, Send Messages and Embed Links permissions.",
+            ephemeral=True
+        )
+    except Exception as ex:
+        await i.response.send_message("Could not post demo vouch: " + str(ex)[:160], ephemeral=True)
+
+
 @bot.tree.command(name="reward-auto-delivery", description="Enable or disable automatic real reward DMs after invite verification")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
