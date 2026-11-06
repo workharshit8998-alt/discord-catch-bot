@@ -1083,6 +1083,104 @@ async def admin_panel(i: discord.Interaction):
     e.set_footer(text="Admin-only controls • Changes sync to the public rewards website")
     await i.response.send_message(embed=e, view=AdminPanel(), ephemeral=True)
 
+def make_demo_vouch_image(username, provider):
+    """Render a proof-channel sample card that is visibly marked as fictional."""
+    image = Image.new("RGB", (1200, 630), (15, 15, 20))
+    draw = ImageDraw.Draw(image)
+    try:
+        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 58)
+        body_font = ImageFont.truetype("DejaVuSans.ttf", 34)
+        small_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 27)
+    except OSError:
+        title_font = body_font = small_font = ImageFont.load_default()
+    gold = (242, 184, 75)
+    draw.rounded_rectangle((35, 35, 1165, 595), radius=32, outline=gold, width=5)
+    draw.text((85, 85), "TRIGGER REWARDS", font=small_font, fill=gold)
+    draw.text((85, 180), "SAMPLE VOUCH", font=title_font, fill=(255, 255, 255))
+    draw.text((85, 290), "Username: " + str(username)[:34], font=body_font, fill=(235, 235, 235))
+    draw.text((85, 355), "Provider: " + str(provider)[:34], font=body_font, fill=(235, 235, 235))
+    draw.rounded_rectangle((85, 455, 1115, 535), radius=18, fill=(110, 35, 35))
+    draw.text((115, 478), "DEMO ONLY • NOT A REAL CUSTOMER / NOT VERIFIED", font=small_font, fill=(255, 255, 255))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
+@bot.tree.command(name="vouch-add", description="Generate clearly labelled sample vouches and proof cards")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 10]):
+    """Post fictional sample vouches; never represent them as genuine customer feedback."""
+    if not i.guild or not i.user.guild_permissions.administrator:
+        return await i.response.send_message("Administrator only.", ephemeral=True)
+
+    await i.response.defer(ephemeral=True, thinking=True)
+    vouch_channel = i.guild.get_channel(VOUCH_MESSAGE_CHANNEL_ID)
+    proof_channel = i.guild.get_channel(VOUCH_EVIDENCE_CHANNEL_ID)
+    if not isinstance(vouch_channel, discord.TextChannel):
+        try:
+            vouch_channel = await i.guild.fetch_channel(VOUCH_MESSAGE_CHANNEL_ID)
+        except Exception:
+            vouch_channel = None
+    if not isinstance(proof_channel, discord.TextChannel):
+        try:
+            proof_channel = await i.guild.fetch_channel(VOUCH_EVIDENCE_CHANNEL_ID)
+        except Exception:
+            proof_channel = None
+    if not isinstance(vouch_channel, discord.TextChannel) or not isinstance(proof_channel, discord.TextChannel):
+        return await i.followup.send(
+            "I couldn't find both configured vouch and proof channels. Check the channel IDs and bot permissions.",
+            ephemeral=True
+        )
+
+    first_names = ["Nova", "Pixel", "Shadow", "Lunar", "Frost", "Blaze", "Echo", "Astra", "Raven", "Cobalt",
+                   "Neon", "Storm", "Cosmic", "Viper", "Misty", "Onyx", "Turbo", "Zen", "Phantom", "Orbit"]
+    second_names = ["Fox", "Wolf", "Byte", "Craft", "Spark", "Knight", "Cloud", "Ninja", "Drift", "Quest",
+                    "Gamer", "Pulse", "Comet", "Rider", "Ghost", "Flare", "Miner", "Wave", "Dash", "Core"]
+    providers = ["Minecraft Rank", "YouTube Premium", "Streaming Reward"]
+    posted = 0
+    failures = []
+
+    try:
+        template = get_vouch_template(i.guild.id)
+    except Exception as ex:
+        return await i.followup.send("Couldn't load the saved vouch template: " + str(ex)[:150], ephemeral=True)
+
+    for index in range(number):
+        username = f"{secrets.choice(first_names)}{secrets.choice(second_names)}{secrets.randbelow(9000) + 1000}"
+        provider = secrets.choice(providers)
+        safe_username = discord.utils.escape_mentions(discord.utils.escape_markdown(username))
+        safe_provider = discord.utils.escape_mentions(discord.utils.escape_markdown(provider))
+        try:
+            rendered = template.format(reward=safe_provider, user=safe_username, ticket="DEMO")
+            embed = discord.Embed(
+                title="🧪 DEMO VOUCH • GENERATED SAMPLE",
+                description=rendered[:4000],
+                color=0x9b59b6
+            )
+            embed.add_field(name="Generated username", value=safe_username, inline=True)
+            embed.add_field(name="Sample reward", value=safe_provider, inline=True)
+            embed.add_field(name="Disclosure", value="FICTIONAL SAMPLE — not a real customer review or verified delivery.", inline=False)
+            embed.set_footer(text="Trigger Rewards • Generated demonstration")
+            await vouch_channel.send(embed=embed)
+
+            card = make_demo_vouch_image(username, provider)
+            await proof_channel.send(
+                content=f"🧪 **DEMO PROOF CARD — NOT REAL CUSTOMER EVIDENCE** · Sample {index + 1}/{number}",
+                file=discord.File(card, filename=f"demo-vouch-{index + 1}.png")
+            )
+            posted += 1
+            await asyncio.sleep(0.8)
+        except Exception as ex:
+            failures.append(f"{index + 1}: {type(ex).__name__}")
+
+    summary = f"Posted **{posted}/{number}** clearly labelled sample vouches in {vouch_channel.mention} and matching DEMO cards in {proof_channel.mention}."
+    if failures:
+        summary += "\nFailed: " + ", ".join(failures[:10])
+    await i.followup.send(summary, ephemeral=True)
+
+
 @bot.tree.command(name="fake-vouch", description="Post a clearly labelled demo vouch using the saved vouch template")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
