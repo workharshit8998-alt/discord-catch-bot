@@ -16,7 +16,7 @@ This branch adds Discord-side stock management and private delivery controls whi
 
 - `/admin-panel` — existing admin panel, with **Add Real Reward Stock** and **Pending DM Deliveries** controls.
 - `/reward-auto-delivery enabled:true|false` — optional automatic delivery after a verified ticket claim. It is disabled by default.
-- Existing ticket commands, category/reward setup, invite verification, vouch evidence, and close-ticket flow remain in place.
+- Real vouches are posted as text-only embeds in the configured vouch channel after the ticket owner says `Legit` and Supabase confirms that exact ticket's reward was delivered. No vouch images or generated sample/fake-vouch commands are used.
 
 ## Required configuration
 
@@ -41,6 +41,7 @@ The bot's pending queue currently receives claims created by the existing Discor
 - Only server administrators can use the delivery controls.
 - The queue contains only pending or known-failed claims; it never DMs all server members.
 - Stock secrets are never shown in the public website or Discord channels.
+- A vouch is posted only for the actual ticket owner after a matching delivered claim is confirmed in Supabase; it is text-only and goes only to the configured vouch channel.
 - The bot verifies that the selected reward exists in the configured category before accepting stock.
 - Inventory reservation is transactional and uses row locking to prevent two admins from allocating the same item.
 - A successful DM is recorded with its Discord message ID.
