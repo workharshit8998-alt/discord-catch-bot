@@ -830,7 +830,7 @@ async def sync_commands(ctx):
             results.append(f"{server.name}: {len(synced)}")
         summary = " · ".join(results) if results else "No servers found"
         await ctx.reply(
-            f"✅ Synced **{total}** slash-command entries across **{len(results)}** server(s).\\n{summary}",
+            f"✅ Synced **{total}** slash-command entries across **{len(results)}** server(s).\n{summary}",
             mention_author=False
         )
     except Exception as ex:
