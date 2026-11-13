@@ -818,11 +818,21 @@ async def on_message(message):
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
 async def sync_commands(ctx):
-    guild = discord.Object(id=ctx.guild.id)
+    total = 0
+    results = []
     try:
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        await ctx.reply(f"✅ Synced **{len(synced)}** slash command(s) to **{ctx.guild.name}**.", mention_author=False)
+        # Sync this bot's global slash commands into every server it currently belongs to.
+        for server in bot.guilds:
+            guild_ref = discord.Object(id=server.id)
+            bot.tree.copy_global_to(guild=guild_ref)
+            synced = await bot.tree.sync(guild=guild_ref)
+            total += len(synced)
+            results.append(f"{server.name}: {len(synced)}")
+        summary = " · ".join(results) if results else "No servers found"
+        await ctx.reply(
+            f"✅ Synced **{total}** slash-command entries across **{len(results)}** server(s).\n{summary}",
+            mention_author=False
+        )
     except Exception as ex:
         await ctx.reply(f"❌ Command sync failed: {type(ex).__name__}: {str(ex)[:180]}", mention_author=False)
 
@@ -839,13 +849,16 @@ async def sync_commands_error(ctx, error):
 @bot.event
 async def on_ready():
     bot.add_view(Panel()); bot.add_view(CloseView())
-    try:
-        guild = discord.Object(id=SYNC_GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Ready as {bot.user}; synced {len(synced)} commands to guild {SYNC_GUILD_ID}")
-    except Exception as e:
-        print(f"Command sync error: {e}")
+    print(f"Ready as {bot.user}; connected to {len(bot.guilds)} server(s).")
+    # Publish the same slash commands separately to every server this bot has joined.
+    for server in bot.guilds:
+        try:
+            guild_ref = discord.Object(id=server.id)
+            bot.tree.copy_global_to(guild=guild_ref)
+            synced = await bot.tree.sync(guild=guild_ref)
+            print(f"Synced {len(synced)} slash commands to {server.name} ({server.id})")
+        except Exception as e:
+            print(f"Command sync error for {server.name} ({server.id}): {e}")
 
 
 class CategoryAddModal(discord.ui.Modal, title="Add Reward Category"):
@@ -1315,13 +1328,16 @@ async def category_add(i:discord.Interaction,key:app_commands.Range[str,2,32],la
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("Administrator only.",ephemeral=True)
     key=re.sub(r"[^a-z0-9_-]","",key.lower().strip())
-    if not key:
-        return await i.response.send_message("Use letters, numbers, hyphens or underscores for the key.",ephemeral=True)
+    if len(key) < 2:
+        return await i.response.send_message("Use at least 2 letters, numbers, hyphens or underscores for the key.",ephemeral=True)
+
+    # Acknowledge immediately: Supabase calls can take longer than Discord's 3-second window.
+    await i.response.defer(ephemeral=True)
     try:
         sb_request("trigger_reward_categories","POST",params={"on_conflict":"guild_id,category_key"},payload={"guild_id":str(i.guild.id),"category_key":key,"category_label":label.strip(),"category_emoji":emoji.strip()[:16] or "🎁","active":True})
-        await i.response.send_message("Saved category **"+label.strip()+"**. Use /reward-add to add its rewards.",ephemeral=True)
+        await i.followup.send("Saved category **"+label.strip()+"**. Use /reward-add to add its rewards.",ephemeral=True)
     except Exception as ex:
-        await i.response.send_message("Could not save category: "+str(ex)[:220],ephemeral=True)
+        await i.followup.send("Could not save category: "+str(ex)[:220],ephemeral=True)
 
 @bot.tree.command(name="category-remove",description="Hide a category and its rewards from the website")
 @app_commands.guild_only()
