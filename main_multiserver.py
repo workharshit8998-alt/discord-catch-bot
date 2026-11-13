@@ -1328,13 +1328,16 @@ async def category_add(i:discord.Interaction,key:app_commands.Range[str,2,32],la
     if not i.guild or not i.user.guild_permissions.administrator:
         return await i.response.send_message("Administrator only.",ephemeral=True)
     key=re.sub(r"[^a-z0-9_-]","",key.lower().strip())
-    if not key:
-        return await i.response.send_message("Use letters, numbers, hyphens or underscores for the key.",ephemeral=True)
+    if len(key) < 2:
+        return await i.response.send_message("Use at least 2 letters, numbers, hyphens or underscores for the key.",ephemeral=True)
+
+    # Acknowledge immediately: Supabase calls can take longer than Discord's 3-second window.
+    await i.response.defer(ephemeral=True)
     try:
         sb_request("trigger_reward_categories","POST",params={"on_conflict":"guild_id,category_key"},payload={"guild_id":str(i.guild.id),"category_key":key,"category_label":label.strip(),"category_emoji":emoji.strip()[:16] or "🎁","active":True})
-        await i.response.send_message("Saved category **"+label.strip()+"**. Use /reward-add to add its rewards.",ephemeral=True)
+        await i.followup.send("Saved category **"+label.strip()+"**. Use /reward-add to add its rewards.",ephemeral=True)
     except Exception as ex:
-        await i.response.send_message("Could not save category: "+str(ex)[:220],ephemeral=True)
+        await i.followup.send("Could not save category: "+str(ex)[:220],ephemeral=True)
 
 @bot.tree.command(name="category-remove",description="Hide a category and its rewards from the website")
 @app_commands.guild_only()
