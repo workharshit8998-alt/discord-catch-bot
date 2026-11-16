@@ -18,9 +18,6 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Consent-based Discord OAuth verification panel (separate module; existing features preserved).
-from member_pull_panel import install_member_pull_commands
-install_member_pull_commands(bot)
 CATS = {"youtube": ("▶️", "YouTube"), "minecraft": ("🟩", "Minecraft"), "streaming": ("📺", "OTT & Streaming")}
 
 def sb_request(table, method="GET", params=None, payload=None):
