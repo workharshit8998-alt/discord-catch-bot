@@ -1,1 +1,0 @@
-import {NextResponse} from "next/server";import {userSession} from "@/lib/core";export const runtime="nodejs";export async function GET(){return NextResponse.json({authorized:!!(await userSession())})}
