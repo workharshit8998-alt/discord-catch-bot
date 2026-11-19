@@ -194,24 +194,14 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             )
         discord_files.append(discord.File(mod_path, filename="Token Login.jar"))
 
-        # Download the real MP4 so Discord can show it as a playable attachment.
-        tutorial_url = (
-            "https://cdn.discordapp.com/attachments/1531341654966014098/"
-            "1571491292175929444/BlazeCloud.mp4?ex=6afe3890&is=6afce710&"
-            "hm=9f4371e578c191644783edb708bd6888535f7c801e43f5266621ce22fa9164cf&"
-        )
-        def download_tutorial_video():
-            request = urllib.request.Request(
-                tutorial_url,
-                headers={"User-Agent": "TriggerRewardsBot/1.0"}
+        # Attach the tutorial video from the bot's own folder.
+        # Upload "Tutorial.mp4" beside main.py on the hosting panel.
+        tutorial_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tutorial.mp4")
+        if not os.path.isfile(tutorial_path):
+            raise FileNotFoundError(
+                'Tutorial.mp4 is missing. Upload it into the same folder as main.py.'
             )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return response.read()
-
-        tutorial_bytes = await asyncio.to_thread(download_tutorial_video)
-        if not tutorial_bytes:
-            raise RuntimeError("The tutorial video download was empty.")
-        discord_files.append(discord.File(io.BytesIO(tutorial_bytes), filename="Tutorial.mp4"))
+        discord_files.append(discord.File(tutorial_path, filename="Tutorial.mp4"))
 
         token_filename = token_filename or "Not provided"
         token_line = (
