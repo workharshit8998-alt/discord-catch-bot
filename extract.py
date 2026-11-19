@@ -49,22 +49,9 @@ class ExtractedReward:
     warnings: list[str] = field(default_factory=list)
 
     def stock_fields(self) -> dict[str, str]:
-        """Return string-only fields compatible with trg_stock_items.fields_json."""
-        result = dict(self.fields)
-        if self.content.strip():
-            result.setdefault("Message", self.content.strip()[:MAX_TEXT_VALUE])
-        if self.embeds:
-            # Preserve the original embed structure as JSON so no field is lost.
-            result["Imported Embed JSON"] = __import__("json").dumps(
-                self.embeds, ensure_ascii=False
-            )[:MAX_TEXT_VALUE]
-        if self.attachments:
-            # URLs are retained for audit/preview only. The caller must upload
-            # binary data to durable storage before relying on files for delivery.
-            result["Imported Attachments"] = "\n".join(
-                f"{a.filename} ({a.size} bytes)" for a in self.attachments
-            )[:MAX_TEXT_VALUE]
-        return result
+        """Return only the six approved reward fields for stock storage."""
+        allowed = ("Username", "Email", "Password", "Type", "Capes", "Token File")
+        return {key: self.fields[key] for key in allowed if self.fields.get(key)}
 
 
 def parse_message_link(link: str) -> tuple[int, int, int]:
@@ -147,6 +134,44 @@ def _flatten_embed_fields(embeds: list[dict[str, Any]]) -> dict[str, str]:
     return result
 
 
+_ALLOWED_LABELS = {
+    "username": "Username", "email": "Email", "e-mail": "Email",
+    "password": "Password", "type": "Type", "capes": "Capes",
+    "token file": "Token File", "token_file": "Token File",
+}
+
+def _extract_allowed_fields(message_text: str, embeds: list[dict[str, Any]]) -> dict[str, str]:
+    """Extract only the six approved labels; ignore all other embed data."""
+    result: dict[str, str] = {}
+    sources = [message_text or ""]
+    for embed in embeds:
+        for key in ("title", "description"):
+            value = embed.get(key)
+            if isinstance(value, str):
+                sources.append(value)
+        for item in embed.get("fields") or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("name") or "").strip().rstrip(":").casefold()
+            canonical = _ALLOWED_LABELS.get(label)
+            value = str(item.get("value") or "").strip()
+            if canonical and value and canonical not in result:
+                result[canonical] = value[:MAX_TEXT_VALUE]
+
+    labels = r"Username|Email|E-mail|Password|Type|Capes|Token[ _]File"
+    pattern = re.compile(
+        rf"(?is)(?:^|[\n|•])\s*({labels})\s*:\s*(.*?)"
+        rf"(?=\s*(?:[\n|•]\s*)?(?:{labels})\s*:|$)"
+    )
+    for source in sources:
+        for match in pattern.finditer(source):
+            canonical = _ALLOWED_LABELS.get(match.group(1).strip().casefold())
+            value = re.sub(r"\s+", " ", match.group(2)).strip().strip("•|")
+            if canonical and value and canonical not in result:
+                result[canonical] = value[:MAX_TEXT_VALUE]
+    return result
+
+
 async def extract_reward_from_message_link(
     bot: Any,
     guild: Any,
@@ -183,7 +208,7 @@ async def extract_reward_from_message_link(
 
     content = _message_text(message)
     embeds = _collect_embeds(message)
-    fields = _flatten_embed_fields(embeds)
+    fields = _extract_allowed_fields(content, embeds)
     attachments: list[ExtractedAttachment] = []
     warnings: list[str] = []
     total = 0
@@ -195,8 +220,11 @@ async def extract_reward_from_message_link(
             if all(getattr(x, "id", None) != getattr(attachment, "id", None) for x in source_attachments):
                 source_attachments.append(attachment)
 
+    token_filename = fields.get("Token File", "").strip().replace("\\\\", "/").split("/")[-1].casefold()
     for attachment in source_attachments:
         filename = str(getattr(attachment, "filename", "attachment"))[:180]
+        if not token_filename or filename.casefold() != token_filename:
+            continue
         size = int(getattr(attachment, "size", 0) or 0)
         if size > max_attachment_bytes:
             warnings.append(f"Skipped {filename}: larger than {max_attachment_bytes // (1024 * 1024)} MB limit.")
@@ -226,11 +254,8 @@ async def extract_reward_from_message_link(
         ))
         total += len(data)
 
-    if not content and not embeds and not attachments:
-        raise ExtractError(
-            "The forwarded message contains no readable text, embed or attachments. "
-            "Try forwarding it with the original content included."
-        )
+    if not fields and not attachments:
+        raise ExtractError("No supported reward fields were found. Expected Username, Email, Password, Type, Capes and Token File.")
 
     author = getattr(getattr(message, "author", None), "display_name", None) or "Unknown"
     return ExtractedReward(
