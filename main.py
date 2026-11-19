@@ -203,26 +203,46 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             else "**Token file:** Not provided"
         )
 
-        description = (
-            "🎁 **REWARD SUCCESSFULLY DELIVERED**\n"
-            f"**Reward:** {reward_name}\n\n"
-            "**REWARD INFO**\n"
-            f"**Type:** {reward_type}\n"
-            f"**Capes:** {capes}\n\n"
-            "**LOGIN METHOD 1 — ID & PASSWORD**\n"
-            "**Working chance:** 50%\n\n"
-            f"**ID:** ||{safe_id}||\n"
-            f"**Email:** ||{safe_email}||\n"
-            f"**Password:** ||{safe_password}||\n\n"
-            "**LOGIN METHOD 2 — TOKEN LOGIN**\n"
-            "**Working chance:** 100%\n"
-            f"{token_line}\n\n"
-            "🧩 **Mod:** `Token Login.jar` (attached)\n"
-            "🎥 **Tutorial:** [Watch tutorial](https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6aff8a10&is=6afe3890&hm=469d83160e9ec393fcb3cad7a52b64780c9cace481fbad638979ae0f246577db&)\n\n"
-            "🔒 *Keep them private.*"
+        embed = discord.Embed(
+            title="🎁 Reward Successfully Delivered",
+            description=f"Your **{reward_name}** reward is ready. Keep all account details private.",
+            color=0xf2b84b
         )
-        embed = discord.Embed(description=description[:4096], color=0xf2b84b)
-        embed.set_footer(text="Trigger Rewards • Secure private delivery")
+        embed.add_field(
+            name="📋 Reward Information",
+            value=f"**Type:** {reward_type}\n**Capes:** {capes}",
+            inline=False
+        )
+        embed.add_field(
+            name="🔐 Login Method 1 · ID & Password",
+            value=(
+                "**Working chance:** 50%\n"
+                f"**ID:** ||{safe_id}||\n"
+                f"**Email:** ||{safe_email}||\n"
+                f"**Password:** ||{safe_password}||"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🔑 Login Method 2 · Token Login",
+            value=f"**Working chance:** 100%\n{token_line}",
+            inline=False
+        )
+        tutorial_url = "https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6aff8a10&is=6afe3890&hm=469d83160e9ec393fcb3cad7a52b64780c9cace481fbad638979ae0f246577db&"
+        embed.add_field(
+            name="🧩 Mod & 🎥 Tutorial",
+            value=(
+                "🧩 **Mod:** `Token Login.jar` (attached)\n"
+                f"🎥 **Tutorial:** [Watch tutorial]({tutorial_url})"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🔒 Privacy",
+            value="Keep your login details and token file private. Never share them with anyone.",
+            inline=False
+        )
+        embed.set_footer(text="TRIGGER REWARDS  •  Secure Private Delivery")
         await user.send(embed=embed, files=discord_files)
     except Exception:
         c=database()
