@@ -200,23 +200,23 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             token_line = "Token file - Not provided"
 
         description = (
-            f"🎁 Reward successfully delivered\\n"
-            f"Reward: {reward_name}\\n"
-            f"Reward Info\\n"
-            f"Type: {reward_type}\\n"
-            f"Capes: {capes}\\n"
-            f"Login Method 1\\n"
-            f"Id and password,\\n"
-            f"Working chance 50%\\n\\n"
-            f"ID: ||{safe_id}||\\n"
-            f"Email: ||{safe_email}||\\n"
-            f"Password: ||{safe_password}||\\n\\n"
-            f"__Login Method 2 __\\n"
-            f"Token Login\\n"
-            f"Working chance 100%\\n"
-            f"{token_line}\\n"
-            f"Mod - [Open file](https://discord.com/channels/1464888284583825501/1465378673036361932/1572827717496471642)\\n"
-            f"Tutorial - [How to use](https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6afe3890&is=6afce710&hm=9f4371e578c191644783edb708bd6888535f7c801e43f5266621ce22fa9164cf&)\\n"
+            f"🎁 Reward successfully delivered\n"
+            f"Reward: {reward_name}\n"
+            f"Reward Info\n"
+            f"Type: {reward_type}\n"
+            f"Capes: {capes}\n"
+            f"Login Method 1\n"
+            f"Id and password,\n"
+            f"Working chance 50%\n\n"
+            f"ID: ||{safe_id}||\n"
+            f"Email: ||{safe_email}||\n"
+            f"Password: ||{safe_password}||\n\n"
+            f"__Login Method 2 __\n"
+            f"Token Login\n"
+            f"Working chance 100%\n"
+            f"{token_line}\n"
+            f"Mod - [Open file](https://discord.com/channels/1464888284583825501/1465378673036361932/1572827717496471642)\n"
+            f"Tutorial - [How to use](https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6afe3890&is=6afce710&hm=9f4371e578c191644783edb708bd6888535f7c801e43f5266621ce22fa9164cf&)\n"
             f"Keep them private"
         )
         embed = discord.Embed(description=description[:4096], color=0xf2b84b)
@@ -1023,7 +1023,7 @@ def stock_dashboard_embed(guild_id):
     e.add_field(name="Paused rewards",value=str(paused),inline=True)
     e.add_field(name="Pending claims",value=str(pending),inline=True)
     e.add_field(name="Successful deliveries",value=str(delivered),inline=True)
-    e.add_field(name="Recent stock entries",value="\\n".join(f"• {x['category_key']} / **{x['reward_name']}** — {'Active' if x['active'] else 'Paused'}" for x in items) or "No stock entries yet.",inline=False)
+    e.add_field(name="Recent stock entries",value="\n".join(f"• {x['category_key']} / **{x['reward_name']}** — {'Active' if x['active'] else 'Paused'}" for x in items) or "No stock entries yet.",inline=False)
     e.set_footer(text="Only the server owner can use these controls.")
     return e
 
