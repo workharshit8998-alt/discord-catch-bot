@@ -185,17 +185,14 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             except Exception as file_ex:
                 print("Skipping unreadable imported stock attachment:", repr(file_ex))
 
-        # Fetch the actual Token.jar attachment from the configured source message.
-        mod_channel = await bot.fetch_channel(1465378673036361932)
-        mod_message = await mod_channel.fetch_message(1572827717496471642)
-        mod_attachment = next(
-            (a for a in mod_message.attachments if a.filename.casefold() == "token.jar"),
-            None
-        )
-        if mod_attachment is None:
-            raise RuntimeError("Token.jar was not found on the configured Mod message.")
-        mod_bytes = await mod_attachment.read()
-        discord_files.append(discord.File(io.BytesIO(mod_bytes), filename="Token.jar"))
+        # Attach the supplied Minecraft mod from the bot's own folder.
+        # Upload "Token Login.jar" beside main.py on the hosting panel.
+        mod_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Token Login.jar")
+        if not os.path.isfile(mod_path):
+            raise FileNotFoundError(
+                'Token Login.jar is missing. Upload it into the same folder as main.py.'
+            )
+        discord_files.append(discord.File(mod_path, filename="Token Login.jar"))
 
         # Download the real MP4 so Discord can show it as a playable attachment.
         tutorial_url = (
@@ -237,7 +234,7 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             "**LOGIN METHOD 2 — TOKEN LOGIN**\n"
             "**Working chance:** 100%\n"
             f"{token_line}\n\n"
-            "🧩 **Mod:** `Token.jar` (attached)\n"
+            "🧩 **Mod:** `Token Login.jar` (attached)\n"
             "🎥 **Tutorial:** `Tutorial.mp4` (attached)\n\n"
             "🔒 *Keep them private.*"
         )
