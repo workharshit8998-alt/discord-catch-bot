@@ -228,7 +228,7 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             value=f"**Working chance:** 100%\n{token_line}",
             inline=False
         )
-        tutorial_url = "https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6aff8a10&is=6afe3890&hm=469d83160e9ec393fcb3cad7a52b64780c9cace481fbad638979ae0f246577db&"
+        tutorial_url = "https://dembed.cc/v/v_XBThQTxy0xUm"
         embed.add_field(
             name="🧩 Mod & 🎥 Tutorial",
             value=(
