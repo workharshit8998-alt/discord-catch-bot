@@ -168,9 +168,9 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
         account_id = pick("Username", "user name", "ID", "id", "account id")
         email = pick("Email", "email address")
         password = pick("Password", "pass")
-        safe_id = discord.utils.escape_markdown(account_id)[:500]
-        safe_email = discord.utils.escape_markdown(email)[:500]
-        safe_password = discord.utils.escape_markdown(password)[:500]
+        safe_id = account_id.replace("\\n", " ").replace("\\r", " ")[:500]
+        safe_email = email.replace("\\n", " ").replace("\\r", " ")[:500]
+        safe_password = password.replace("\\n", " ").replace("\\r", " ")[:500]
 
         discord_files = []
         token_filename = pick("Token File")
