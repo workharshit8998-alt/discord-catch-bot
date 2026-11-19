@@ -467,6 +467,17 @@ def database():
         invite_charged INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_trg_claim_pending ON trg_stock_claims(guild,status,created_at);
+    CREATE TABLE IF NOT EXISTS trg_stock_import_settings(
+        guild INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS trg_stock_import_targets(
+        guild INTEGER NOT NULL, category_key TEXT NOT NULL, reward_name TEXT NOT NULL,
+        PRIMARY KEY(guild,category_key,reward_name)
+    );
+    CREATE TABLE IF NOT EXISTS trg_stock_imported_messages(
+        guild INTEGER NOT NULL, message_id INTEGER NOT NULL, imported_at TEXT NOT NULL,
+        PRIMARY KEY(guild,message_id)
+    );
     """)
     claim_columns={row[1] for row in c.execute("PRAGMA table_info(trg_stock_claims)").fetchall()}
     if "invite_cost" not in claim_columns:
@@ -1508,10 +1519,214 @@ class DeleteAllTicketsView(discord.ui.View):
         await i.response.edit_message(content="Cancelled. No ticket channels were deleted.", view=None)
 
 
+class StockImportTargetSelect(discord.ui.Select):
+    def __init__(self, guild_id, channel_id, rewards, selected):
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        options = []
+        selected_values = set(selected)
+        for row in rewards[:25]:
+            key = f"{row['category']}::{row['reward_name']}"
+            options.append(discord.SelectOption(
+                label=str(row["reward_name"])[:100],
+                value=key[:100],
+                description=str(row.get("category_label") or row["category"])[:100],
+                default=key in selected_values,
+            ))
+        super().__init__(
+            placeholder="Select every reward that should receive each embed",
+            min_values=1, max_values=len(options), options=options,
+        )
+
+    async def callback(self, i: discord.Interaction):
+        if not is_guild_owner(i):
+            return await i.response.send_message("Only the server owner can configure automatic stock imports.", ephemeral=True)
+        parsed = []
+        for value in self.values:
+            if "::" not in value:
+                continue
+            category_key, reward_name = value.split("::", 1)
+            parsed.append((category_key, reward_name))
+        if not parsed:
+            return await i.response.send_message("Select at least one reward.", ephemeral=True)
+        c = database()
+        c.execute("DELETE FROM trg_stock_import_targets WHERE guild=?", (self.guild_id,))
+        c.executemany(
+            "INSERT INTO trg_stock_import_targets(guild,category_key,reward_name) VALUES(?,?,?)",
+            [(self.guild_id, category, name) for category, name in parsed],
+        )
+        c.execute(
+            "INSERT INTO trg_stock_import_settings(guild,channel_id) VALUES(?,?) "
+            "ON CONFLICT(guild) DO UPDATE SET channel_id=excluded.channel_id",
+            (self.guild_id, self.channel_id),
+        )
+        c.commit()
+        c.close()
+        await i.response.edit_message(
+            content=(f"✅ Automatic stock import is configured for <#{self.channel_id}>. "
+                     f"Each forwarded embed will be copied into **{len(parsed)} selected reward(s)**. "
+                     "These settings stay saved until you change them."),
+            view=None,
+        )
+
+
+class StockImportSetupView(discord.ui.View):
+    def __init__(self, guild_id, channel_id, rewards, selected):
+        super().__init__(timeout=300)
+        self.add_item(StockImportTargetSelect(guild_id, channel_id, rewards, selected))
+
+
+@bot.tree.command(name="stock-import-setup", description="Set the auto-import channel and choose multiple stock rewards")
+@app_commands.guild_only()
+async def stock_import_setup(i: discord.Interaction, channel: discord.TextChannel):
+    if not i.guild or not is_guild_owner(i):
+        return await i.response.send_message("🔒 Only the server owner can configure automatic stock imports.", ephemeral=True)
+    try:
+        rewards = get_rewards(i.guild.id)
+        if not rewards:
+            return await i.response.send_message("No rewards are configured yet. Add your rewards first, then run this command again.", ephemeral=True)
+        c = database()
+        existing_channel = c.execute(
+            "SELECT channel_id FROM trg_stock_import_settings WHERE guild=?", (i.guild.id,)
+        ).fetchone()
+        selected = [
+            f"{row['category_key']}::{row['reward_name']}"
+            for row in c.execute(
+                "SELECT category_key,reward_name FROM trg_stock_import_targets WHERE guild=?",
+                (i.guild.id,),
+            ).fetchall()
+        ]
+        c.close()
+        reward_options = [
+            row for row in rewards
+            if row.get("category") and row.get("reward_name")
+        ]
+        if not reward_options:
+            return await i.response.send_message("No usable reward entries were found.", ephemeral=True)
+        if len(reward_options) > 25:
+            return await i.response.send_message("Discord allows up to 25 choices in one menu. There are more than 25 configured rewards, so reduce the reward list before setting this up.", ephemeral=True)
+        await i.response.send_message(
+            f"**Auto-import channel:** {channel.mention}\nSelect all rewards that should receive every forwarded embed. "
+            "Your selection will remain saved until you run this setup again.",
+            view=StockImportSetupView(i.guild.id, channel.id, reward_options, selected),
+            ephemeral=True,
+        )
+    except Exception as ex:
+        await i.response.send_message("Could not open auto-import setup: " + str(ex)[:180], ephemeral=True)
+
+
+def _message_has_reward_embed(message):
+    if getattr(message, "embeds", None):
+        return True
+    snapshots = getattr(message, "message_snapshots", None) or getattr(message, "snapshots", None) or []
+    return any(getattr(getattr(snapshot, "message", snapshot), "embeds", None) for snapshot in snapshots)
+
+
+async def auto_import_stock_message(message):
+    if not message.guild or message.author.bot or not _message_has_reward_embed(message):
+        return
+    c = database()
+    settings = c.execute(
+        "SELECT channel_id FROM trg_stock_import_settings WHERE guild=?", (message.guild.id,)
+    ).fetchone()
+    if not settings or int(settings["channel_id"]) != message.channel.id:
+        c.close()
+        return
+    targets = c.execute(
+        "SELECT category_key,reward_name FROM trg_stock_import_targets WHERE guild=? ORDER BY category_key,reward_name",
+        (message.guild.id,),
+    ).fetchall()
+    c.close()
+    if not targets:
+        return
+    # Only the server owner can place source embeds into this channel for importing.
+    if message.author.id != message.guild.owner_id:
+        try:
+            await message.channel.send("🔒 Auto-import skipped: only the server owner can post reward embeds in this channel.")
+        except Exception:
+            pass
+        return
+
+    message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
+    try:
+        extracted = await extract_reward_from_message_link(
+            bot, message.guild, message_link, allowed_channel_id=message.channel.id
+        )
+        values = extracted.stock_fields()
+        if extracted.attachments:
+            values["__trg_attachments"] = [
+                {"filename": a.filename, "content_type": a.content_type,
+                 "size": a.size, "data": base64.b64encode(a.data).decode("ascii")}
+                for a in extracted.attachments[:10]
+            ]
+        payload = json.dumps(values, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > 32 * 1024 * 1024:
+            raise ExtractError("The extracted reward and files are too large to store.")
+        now = datetime.now(timezone.utc).isoformat()
+        c = database()
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute(
+                "INSERT INTO trg_stock_imported_messages(guild,message_id,imported_at) VALUES(?,?,?)",
+                (message.guild.id, message.id, now),
+            )
+            for target in targets:
+                c.execute(
+                    "INSERT INTO trg_stock_items(guild,category_key,reward_name,fields_json,active,created_at,updated_at) "
+                    "VALUES(?,?,?,?,1,?,?)",
+                    (message.guild.id, target["category_key"], target["reward_name"], payload, now, now),
+                )
+            c.commit()
+        except sqlite3.IntegrityError:
+            c.rollback()
+            c.close()
+            return
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+        names = ", ".join(f"**{x['reward_name']}**" for x in targets)
+        note = f"\n⚠️ {len(extracted.warnings)} file warning(s): " + "; ".join(extracted.warnings[:2]) if extracted.warnings else ""
+        await message.channel.send(
+            f"✅ Auto-imported this embed into **{len(targets)} reward stock(s)**: {names}. "
+            f"Saved {len(values)} approved fields and {len(extracted.attachments)} file(s).{note}"
+        )
+        # Keep existing behavior: try queued claims for each reward that just received stock.
+        for target in targets:
+            c = database()
+            pending = [row["id"] for row in c.execute(
+                "SELECT id FROM trg_stock_claims WHERE guild=? AND category_key=? AND reward_name=? AND status='pending' ORDER BY created_at",
+                (message.guild.id, target["category_key"], target["reward_name"]),
+            ).fetchall()]
+            c.close()
+            for claim_id in pending:
+                try:
+                    await deliver_real_reward(message.guild, claim_id, "auto-import")
+                except Exception as ex:
+                    print("Auto-import pending claim remains queued:", claim_id, repr(ex))
+    except ExtractError as ex:
+        await message.channel.send(f"❌ Auto-import failed: {str(ex)[:250]}")
+    except Exception as ex:
+        print("Automatic reward stock import failed:", repr(ex))
+        try:
+            await message.channel.send("❌ Auto-import failed. Check the bot logs; no stock confirmation was issued.")
+        except Exception:
+            pass
+
+
 @bot.event
 async def on_message(message):
     await auto_verify_falcon_report(message)
     await capture_legit_evidence(message)
+    try:
+        await auto_import_stock_message(message)
+    except Exception as ex:
+        print("Auto-import handler error:", repr(ex))
     await bot.process_commands(message)
 
 @bot.command(name="sync")
