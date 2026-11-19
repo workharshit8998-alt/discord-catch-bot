@@ -194,14 +194,26 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             )
         discord_files.append(discord.File(mod_path, filename="Token Login.jar"))
 
-        # Attach the tutorial video from the bot's own folder.
-        # Upload "Tutorial.mp4" beside main.py on the hosting panel.
-        tutorial_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tutorial.mp4")
-        if not os.path.isfile(tutorial_path):
-            raise FileNotFoundError(
-                'Tutorial.mp4 is missing. Upload it into the same folder as main.py.'
+        # Find the tutorial attachment in its Discord channel by its stable attachment ID.
+        # This avoids relying on the expiring signed CDN URL.
+        tutorial_channel = await bot.fetch_channel(1465378673036361932)
+        tutorial_attachment = None
+        async for tutorial_message in tutorial_channel.history(limit=500):
+            tutorial_attachment = next(
+                (a for a in tutorial_message.attachments if a.id == 1572853145023815860),
+                None
             )
-        discord_files.append(discord.File(tutorial_path, filename="Tutorial.mp4"))
+            if tutorial_attachment is not None:
+                break
+        if tutorial_attachment is None:
+            raise RuntimeError(
+                "Tutorial video attachment was not found in the configured Discord channel. "
+                "Check the bot's View Channel and Read Message History permissions."
+            )
+        tutorial_bytes = await tutorial_attachment.read()
+        if not tutorial_bytes:
+            raise RuntimeError("The tutorial video attachment was empty.")
+        discord_files.append(discord.File(io.BytesIO(tutorial_bytes), filename="Tutorial.mp4"))
 
         token_filename = token_filename or "Not provided"
         token_line = (
