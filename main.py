@@ -708,7 +708,7 @@ class PendingStockClaimSelect(discord.ui.Select):
 
 class ImportMessageLinkModal(discord.ui.Modal, title="Import Forwarded Reward Embed"):
     message_link = discord.ui.TextInput(
-        label="Message link from this server's import channel",
+        label="Message link",
         placeholder="https://discord.com/channels/server/channel/message",
         max_length=200,
     )
@@ -1899,6 +1899,9 @@ async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 1
             ephemeral=True
         )
 
+    # Defer before the batch send loop so Discord does not expire the interaction.
+    await i.response.defer(ephemeral=True, thinking=True)
+
     first_names = ["Nova", "Pixel", "Shadow", "Lunar", "Frost", "Blaze", "Echo", "Astra", "Raven", "Cobalt"]
     second_names = ["Fox", "Wolf", "Byte", "Craft", "Spark", "Knight", "Cloud", "Ninja", "Drift", "Quest"]
     providers = ["MCFA", "Nitro 1M", "Nitro 3M", "MCFA Permanent"]
@@ -1924,7 +1927,7 @@ async def vouch_add(i: discord.Interaction, number: app_commands.Range[int, 1, 1
     summary = f"Posted **{posted}/{number}** sample preview embeds in {target.mention}."
     if failures:
         summary += "\nFailed: " + ", ".join(failures[:10])
-    await i.response.send_message(summary, ephemeral=True)
+    await i.followup.send(summary, ephemeral=True)
 
 
 @bot.tree.command(name="fake-vouch", description="Post one clearly labelled demo vouch")
