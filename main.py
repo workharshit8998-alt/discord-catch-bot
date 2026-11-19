@@ -194,26 +194,7 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             )
         discord_files.append(discord.File(mod_path, filename="Token Login.jar"))
 
-        # Find the tutorial attachment in its Discord channel by its stable attachment ID.
-        # This avoids relying on the expiring signed CDN URL.
-        tutorial_channel = await bot.fetch_channel(1465378673036361932)
-        tutorial_attachment = None
-        async for tutorial_message in tutorial_channel.history(limit=500):
-            tutorial_attachment = next(
-                (a for a in tutorial_message.attachments if a.id == 1572853145023815860),
-                None
-            )
-            if tutorial_attachment is not None:
-                break
-        if tutorial_attachment is None:
-            raise RuntimeError(
-                "Tutorial video attachment was not found in the configured Discord channel. "
-                "Check the bot's View Channel and Read Message History permissions."
-            )
-        tutorial_bytes = await tutorial_attachment.read()
-        if not tutorial_bytes:
-            raise RuntimeError("The tutorial video attachment was empty.")
-        discord_files.append(discord.File(io.BytesIO(tutorial_bytes), filename="Tutorial.mp4"))
+
 
         token_filename = token_filename or "Not provided"
         token_line = (
@@ -237,7 +218,7 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             "**Working chance:** 100%\n"
             f"{token_line}\n\n"
             "🧩 **Mod:** `Token Login.jar` (attached)\n"
-            "🎥 **Tutorial:** `Tutorial.mp4` (attached)\n\n"
+            "🎥 **Tutorial:** [Watch tutorial](https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6aff8a10&is=6afe3890&hm=469d83160e9ec393fcb3cad7a52b64780c9cace481fbad638979ae0f246577db&)\n\n"
             "🔒 *Keep them private.*"
         )
         embed = discord.Embed(description=description[:4096], color=0xf2b84b)
