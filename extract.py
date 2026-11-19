@@ -159,14 +159,14 @@ def _extract_allowed_fields(message_text: str, embeds: list[dict[str, Any]]) -> 
                 result[canonical] = value[:MAX_TEXT_VALUE]
 
     labels = r"Username|Email|E-mail|Password|Type|Capes|Token[ _]File"
-    pattern = re.compile(
-        rf"(?is)(?:^|[\n|•])\s*({labels})\s*:\s*(.*?)"
-        rf"(?=\s*(?:[\n|•]\s*)?(?:{labels})\s*:|$)"
-    )
+    line_pattern = re.compile(rf"^\s*[^\w]*({labels})\s*:\s*(.*?)\s*$", re.IGNORECASE)
     for source in sources:
-        for match in pattern.finditer(source):
+        for line in source.splitlines():
+            match = line_pattern.match(line)
+            if not match:
+                continue
             canonical = _ALLOWED_LABELS.get(match.group(1).strip().casefold())
-            value = re.sub(r"\s+", " ", match.group(2)).strip().strip("•|")
+            value = match.group(2).strip().strip("•|")
             if canonical and value and canonical not in result:
                 result[canonical] = value[:MAX_TEXT_VALUE]
     return result
