@@ -207,7 +207,7 @@ def _token_link(value: str) -> tuple[Optional[str], Optional[str]]:
     value = str(value or "").strip()
     markdown = re.search(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", value)
     if markdown:
-        filename = markdown.group(1).strip().strip("_")
+        filename = _clean_username(markdown.group(1)).strip().strip("_")
         url = markdown.group(2).rstrip(".,>")
     else:
         match = re.search(r"https?://[^\s<>()]+", value)
