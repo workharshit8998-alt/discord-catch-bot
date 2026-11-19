@@ -153,35 +153,68 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
         # Imported binary files are stored inside the stock JSON as base64 so they
         # survive restarts and do not depend on temporary host filesystem paths.
         attachment_records = fields.pop("__trg_attachments", []) if isinstance(fields, dict) else []
+        # Build a clean delivery card. Only account ID/username and password
+        # are spoiler-hidden; email, type and capes remain readable.
         details_list = []
+        token_filename = str(fields.get("Token File", "")).strip()
         for key, value in fields.items():
-            if key == "Imported Embed JSON":
-                continue  # Keep the original embed JSON in stock for audit, not in the member DM.
+            if key in ("Imported Embed JSON", "Token File"):
+                continue
             text_value = str(value).strip()
-            if text_value:
-                details_list.append(f"**{discord.utils.escape_markdown(str(key))}:** ||{text_value[:650]}||")
-        details = "\n".join(details_list)[:3400] or "Your reward details will be provided by staff."
-        if attachment_records:
-            details += f"\n\n📎 **Attached files:** {len(attachment_records)}"
-        embed=discord.Embed(
-            title="🎁 Your Trigger Rewards prize is here!",
-            description=(
-                f"**Reward:** {discord.utils.escape_markdown(claim['reward_name'])}"
-                f"\n\n{details}\n\n"
-                "Keep these details private."
-            )[:4096],
-            color=0xf2b84b
-        )
-        embed.set_footer(text="Trigger Rewards • Private delivery")
+            if not text_value:
+                continue
+            key_name = str(key).strip()
+            key_lower = key_name.casefold()
+            if key_lower in ("username", "user name", "id", "account id"):
+                label = "ID"
+                rendered_value = f"||{text_value[:650]}||"
+            elif key_lower == "password":
+                label = "Password"
+                rendered_value = f"||{text_value[:650]}||"
+            else:
+                label = discord.utils.escape_markdown(key_name)
+                rendered_value = text_value[:650]
+            details_list.append(f"**{label}:** {rendered_value}")
+
         discord_files = []
         for record in attachment_records[:10]:
             try:
                 raw = base64.b64decode(record.get("data", ""), validate=True)
                 if raw:
-                    discord_files.append(discord.File(io.BytesIO(raw), filename=record.get("filename") or "reward-file"))
+                    discord_files.append(discord.File(
+                        io.BytesIO(raw),
+                        filename=record.get("filename") or "reward-file"
+                    ))
             except Exception as file_ex:
                 print("Skipping unreadable imported stock attachment:", repr(file_ex))
-        await user.send(embed=embed, files=discord_files if discord_files else None)
+
+        # Upload the real file first so Discord gives us its permanent CDN URL.
+        # The following embed links directly to that uploaded attachment.
+        uploaded_file_urls = {}
+        if discord_files:
+            file_message = await user.send(files=discord_files)
+            for uploaded in file_message.attachments:
+                uploaded_file_urls[uploaded.filename.casefold()] = uploaded.url
+
+        if token_filename:
+            token_url = uploaded_file_urls.get(token_filename.casefold())
+            if token_url:
+                details_list.append(f"📎 **Token File:** [{discord.utils.escape_markdown(token_filename)}]({token_url})")
+            else:
+                details_list.append(f"📎 **Token File:** {discord.utils.escape_markdown(token_filename)}")
+
+        details = "\n".join(details_list)[:3400] or "Your reward details will be provided by staff."
+        embed = discord.Embed(
+            title="🎁 Reward successfully delivered",
+            description=(
+                f"**Reward:** {discord.utils.escape_markdown(claim['reward_name'])}"
+                f"\n\n{details}\n\n"
+                "🔒 Keep your account details private. Do not share this message."
+            )[:4096],
+            color=0xf2b84b
+        )
+        embed.set_footer(text="Trigger Rewards • Secure private delivery")
+        await user.send(embed=embed)
     except Exception:
         c=database()
         c.execute("UPDATE trg_stock_claims SET status='pending' WHERE id=? AND status='sending'",(int(claim_id),))
