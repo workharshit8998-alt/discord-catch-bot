@@ -228,7 +228,7 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             value=f"**Working chance:** 100%\n{token_line}",
             inline=False
         )
-        tutorial_url = "https://dembed.cc/v/v_XBThQTxy0xUm"
+        tutorial_url = "https://discord.com/channels/1464888284583825501/1572857939201622066"
         embed.add_field(
             name="🧩 Mod & 🎥 Tutorial",
             value=(
