@@ -185,43 +185,65 @@ async def deliver_real_reward(guild, claim_id, actor_label="auto"):
             except Exception as file_ex:
                 print("Skipping unreadable imported stock attachment:", repr(file_ex))
 
-        uploaded_file_urls = {}
-        if discord_files:
-            file_message = await user.send(files=discord_files)
-            for uploaded in file_message.attachments:
-                uploaded_file_urls[uploaded.filename.casefold()] = uploaded.url
+        # Fetch the actual Token.jar attachment from the configured source message.
+        mod_channel = await bot.fetch_channel(1465378673036361932)
+        mod_message = await mod_channel.fetch_message(1572827717496471642)
+        mod_attachment = next(
+            (a for a in mod_message.attachments if a.filename.casefold() == "token.jar"),
+            None
+        )
+        if mod_attachment is None:
+            raise RuntimeError("Token.jar was not found on the configured Mod message.")
+        mod_bytes = await mod_attachment.read()
+        discord_files.append(discord.File(io.BytesIO(mod_bytes), filename="Token.jar"))
 
-        token_url = uploaded_file_urls.get(token_filename.casefold()) if token_filename else None
-        if token_url:
-            token_line = f"Token file - [{discord.utils.escape_markdown(token_filename)}]({token_url})"
-        elif token_filename:
-            token_line = f"Token file - {discord.utils.escape_markdown(token_filename)}"
-        else:
-            token_line = "Token file - Not provided"
+        # Download the real MP4 so Discord can show it as a playable attachment.
+        tutorial_url = (
+            "https://cdn.discordapp.com/attachments/1531341654966014098/"
+            "1571491292175929444/BlazeCloud.mp4?ex=6afe3890&is=6afce710&"
+            "hm=9f4371e578c191644783edb708bd6888535f7c801e43f5266621ce22fa9164cf&"
+        )
+        def download_tutorial_video():
+            request = urllib.request.Request(
+                tutorial_url,
+                headers={"User-Agent": "TriggerRewardsBot/1.0"}
+            )
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+
+        tutorial_bytes = await asyncio.to_thread(download_tutorial_video)
+        if not tutorial_bytes:
+            raise RuntimeError("The tutorial video download was empty.")
+        discord_files.append(discord.File(io.BytesIO(tutorial_bytes), filename="Tutorial.mp4"))
+
+        token_filename = token_filename or "Not provided"
+        token_line = (
+            f"**Token file:** `{discord.utils.escape_markdown(token_filename)}` (attached)"
+            if token_filename != "Not provided"
+            else "**Token file:** Not provided"
+        )
 
         description = (
-            f"🎁 Reward successfully delivered\n"
-            f"Reward: {reward_name}\n"
-            f"Reward Info\n"
-            f"Type: {reward_type}\n"
-            f"Capes: {capes}\n"
-            f"Login Method 1\n"
-            f"Id and password,\n"
-            f"Working chance 50%\n\n"
-            f"ID: ||{safe_id}||\n"
-            f"Email: ||{safe_email}||\n"
-            f"Password: ||{safe_password}||\n\n"
-            f"__Login Method 2 __\n"
-            f"Token Login\n"
-            f"Working chance 100%\n"
-            f"{token_line}\n"
-            f"Mod - [Open file](https://discord.com/channels/1464888284583825501/1465378673036361932/1572827717496471642)\n"
-            f"Tutorial - [How to use](https://cdn.discordapp.com/attachments/1531341654966014098/1571491292175929444/BlazeCloud.mp4?ex=6afe3890&is=6afce710&hm=9f4371e578c191644783edb708bd6888535f7c801e43f5266621ce22fa9164cf&)\n"
-            f"Keep them private"
+            "🎁 **REWARD SUCCESSFULLY DELIVERED**\\n"
+            f"**Reward:** {reward_name}\\n\\n"
+            "**REWARD INFO**\\n"
+            f"**Type:** {reward_type}\\n"
+            f"**Capes:** {capes}\\n\\n"
+            "**LOGIN METHOD 1 — ID & PASSWORD**\\n"
+            "**Working chance:** 50%\\n\\n"
+            f"**ID:** ||{safe_id}||\\n"
+            f"**Email:** ||{safe_email}||\\n"
+            f"**Password:** ||{safe_password}||\\n\\n"
+            "**LOGIN METHOD 2 — TOKEN LOGIN**\\n"
+            "**Working chance:** 100%\\n"
+            f"{token_line}\\n\\n"
+            "🧩 **Mod:** `Token.jar` (attached)\\n"
+            "🎥 **Tutorial:** `Tutorial.mp4` (attached)\\n\\n"
+            "🔒 *Keep them private.*"
         )
         embed = discord.Embed(description=description[:4096], color=0xf2b84b)
         embed.set_footer(text="Trigger Rewards • Secure private delivery")
-        await user.send(embed=embed)
+        await user.send(embed=embed, files=discord_files)
     except Exception:
         c=database()
         c.execute("UPDATE trg_stock_claims SET status='pending' WHERE id=? AND status='sending'",(int(claim_id),))
